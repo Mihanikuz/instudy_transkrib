@@ -1,0 +1,5 @@
+# Держит torch/torchaudio на сборке cu128 во всех слоях установки: без этого pyannote.audio (torch>=2.8) или GigaAM
+# (torch>=2.6) могут подтянуть CPU-сборку или другую версию с PyPI.
+torch==2.10.0+cu128
+torchaudio==2.10.0+cu128
+torchcodec==0.10.0
