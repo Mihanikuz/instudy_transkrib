@@ -1,0 +1,26 @@
+[project]
+name = "instudy-transkrib"
+version = "0.1.0"
+description = "Сервер автоматической транскрибации лекций для «Моего расписания» (GigaAM v3 e2e RNNT + pyannote)"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = ["transkrib"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Тесты: assert, тестовые «секреты» и запуск подпроцессов — норма.
+"tests/**" = ["S101", "S105", "S106", "S603"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: нужен GPU и модели; запускается только с --gpu на сервере",
+]

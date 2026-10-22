@@ -1,0 +1,9 @@
+# Инструменты разработки и CI. Ставятся вместе с requirements.txt:
+#   pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+# Собирается так:
+#   pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
+-c requirements.txt
+pytest==9.1.1
+ruff==0.17.1
+# разбор compose.yml в тестах (T-7)
+PyYAML==6.0.3
