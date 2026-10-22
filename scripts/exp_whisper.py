@@ -1,4 +1,4 @@
-"""Эксперимент: Whisper вместо GigaAM в том же конвейере (диаризация pyannote, нарезка, рендер — наши).
+"""Эксперимент: Whisper или Qwen3-ASR вместо GigaAM в том же конвейере (диаризация pyannote, нарезка, рендер — наши).
 
 Не для продакшена: ветка exp/whisper. Нужен для честного сравнения моделей на одной и той же нарезке.
 
@@ -77,11 +77,54 @@ class WhisperRecognizer:
             self._torch.cuda.empty_cache()
 
 
+class QwenRecognizer:
+    """Recognizer на qwen-asr (Qwen3-ASR, бэкенд transformers): bf16, CUDA, язык «Russian», необязательный контекст."""
+
+    def __init__(self, model_path: str, *, context: str = "", batch: int = 16) -> None:
+        self.model_path, self.context, self.batch = model_path, context, batch
+        self.model: Any = None
+        self._torch: Any = None
+
+    def info(self) -> str:
+        return f"Qwen3-ASR ({'с контекстом' if self.context else 'без контекста'})"
+
+    def load(self) -> None:
+        if self.model is not None:
+            return
+        import torch
+        from qwen_asr import Qwen3ASRModel
+
+        self.model = Qwen3ASRModel.from_pretrained(
+            self.model_path,
+            dtype=torch.bfloat16,
+            device_map="cuda:0",
+            max_inference_batch_size=self.batch,
+            max_new_tokens=256,
+        )
+        self._torch = torch
+
+    def transcribe(self, samples: np.ndarray) -> str:
+        return self.transcribe_batch([samples])[0]
+
+    def transcribe_batch(self, chunks: Sequence[np.ndarray]) -> list[str]:
+        audio = [(check_chunk(c), SAMPLE_RATE) for c in chunks]
+        results = self.model.transcribe(audio=audio, language="Russian", context=self.context)
+        return [r.text.strip() for r in results]
+
+    def unload(self) -> None:
+        self.model = None
+        gc.collect()
+        if self._torch is not None:
+            self._torch.cuda.empty_cache()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Whisper в конвейере transkrib (эксперимент)")
     parser.add_argument("audio", type=Path)
     parser.add_argument("--model", default="openai/whisper-large-v3")
     parser.add_argument("--beams", type=int, default=1)
+    parser.add_argument("--engine", choices=["whisper", "qwen"], default="whisper")
+    parser.add_argument("--context-file", type=Path, help="текст подсказки для Qwen3-ASR (термины курса)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -90,14 +133,17 @@ def main(argv: list[str] | None = None) -> int:
     # Скачать модель до старта конвейера: pyannote при загрузке включает офлайн-режим Hugging Face.
     from huggingface_hub import snapshot_download
 
-    snapshot_download(args.model, cache_dir=str(cache), allow_patterns=["*.json", "*.safetensors", "*.txt", "*.model"])
+    local = snapshot_download(args.model, cache_dir=str(cache))
     os.environ["HF_HUB_OFFLINE"] = "1"
 
-    cli.ENGINE_LINE = f"{args.model.split('/')[-1]}, pyannote community-1"
-    cli.make_models = lambda s: (
-        PyannoteDiarizer(s.models_dir),
-        WhisperRecognizer(args.model, cache, beams=args.beams),
-    )
+    context = args.context_file.read_text(encoding="utf-8").strip() if args.context_file else ""
+    suffix = " + контекст" if context else ""
+    cli.ENGINE_LINE = f"{args.model.split('/')[-1]}{suffix}, pyannote community-1"
+    if args.engine == "qwen":
+        recognizer: Any = QwenRecognizer(local, context=context)
+    else:
+        recognizer = WhisperRecognizer(args.model, cache, beams=args.beams)
+    cli.make_models = lambda s: (PyannoteDiarizer(s.models_dir), recognizer)
     return cli.main(["run-file", str(args.audio), "--out", str(args.out)])
 
 
