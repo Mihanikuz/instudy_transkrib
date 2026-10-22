@@ -23,9 +23,36 @@ _WS_RX = re.compile(r"\s+")
 _SPACE_BEFORE_PUNCT_RX = re.compile(r"\s+([.,!?;:…»)\]])")
 _SPACE_AFTER_OPEN_RX = re.compile(r"([«(\[])\s+")
 
+# Заполнители (решение человека 22.10): отдельные звуки-паузы «а-а», «э-э», «м-м», «эээ», «ммм», «хм», «эм».
+# Только повторённая буква (с дефисами или без), одиночное «э» и «эм»/«хм» — одиночные «а», «о», «у» это союзы
+# и предлоги, они не трогаются; слова вроде «значит», «вот», «ну» тоже остаются.
+_FILLER_RX = re.compile(
+    r"(?<![\w-])(?:(?P<v>[аэмыуо])(?:-?(?P=v))+|э|эм+|хм+)(?![\w-])(?P<p>[,…]|\.\.\.)?",
+    re.IGNORECASE,
+)
+_CAP = "\x00"  # метка «здесь начиналось предложение с заглавной буквы»
+_CAP_RX = re.compile(_CAP + r"[\s,;:…—-]*(\w)")
+_LEADING_PUNCT_RX = re.compile(r"^[\s,.;:!?…—-]+")
+_DOUBLE_PUNCT_RX = re.compile(r"([,;:])\s*(?=[,.!?;:…])")
+
 
 def speaker_label(n: int) -> str:
     return SPEAKER_LABEL.format(n=n)
+
+
+def remove_fillers(text: str) -> str:
+    """Убрать заполнители, не ломая пунктуацию и заглавную букву в начале предложения."""
+
+    def drop(match: re.Match[str]) -> str:
+        return f" {_CAP} " if match.group(0)[0].isupper() else " "
+
+    if not _FILLER_RX.search(text):
+        return text
+    text = _FILLER_RX.sub(drop, text)
+    text = _DOUBLE_PUNCT_RX.sub("", text)
+    text = _CAP_RX.sub(lambda m: m.group(1).upper(), text)
+    text = _LEADING_PUNCT_RX.sub("", text.replace(_CAP, ""))
+    return _clean(text)
 
 
 def _clean(text: str) -> str:
@@ -43,10 +70,10 @@ class _Cue:
 
 
 def _prepare(segments: Iterable[Segment]) -> list[_Cue]:
-    """Отбросить пустые, упорядочить, проверить спикеров и время, убрать пересечения."""
+    """Убрать заполнители и пустые, упорядочить, перенумеровать спикеров, проверить время, убрать пересечения."""
     cues: list[_Cue] = []
     for seg in segments:
-        text = _clean(seg.text)
+        text = remove_fillers(_clean(seg.text))
         if not text:
             continue
         if seg.start < 0 or seg.end <= seg.start:
@@ -58,9 +85,12 @@ def _prepare(segments: Iterable[Segment]) -> list[_Cue]:
         raise ValueError("Нет ни одного сегмента с текстом")
 
     cues.sort(key=lambda c: (c.start_ms, c.end_ms))
-    speakers = {c.speaker for c in cues}
-    if speakers != set(range(1, max(speakers) + 1)):
-        raise ValueError(f"Номера спикеров должны идти без пропусков: {sorted(speakers)}")
+    # Номера по порядку первого появления среди реплик, оставшихся с текстом: если у спикера все реплики оказались
+    # пустыми или одними заполнителями, номера не должны «прыгать» (Спикер 1, Спикер 3).
+    numbers: dict[int, int] = {}
+    for cue in cues:
+        numbers.setdefault(cue.speaker, len(numbers) + 1)
+    cues = [_Cue(c.start_ms, c.end_ms, numbers[c.speaker], c.text) for c in cues]
 
     # Пересечение: конец предыдущей реплики подрезается до начала следующей.
     out: list[_Cue] = []

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.instudy_reference import extract_subtitles
-from transkrib.render import build_meta, parse_vtt, render_txt, render_vtt, validate_vtt
+from transkrib.render import build_meta, parse_vtt, remove_fillers, render_txt, render_vtt, validate_vtt
 from transkrib.types import Segment
 
 FIXTURES = Path(__file__).parent / "fixtures" / "render"
@@ -89,11 +89,55 @@ def test_empty_segments_are_skipped() -> None:
     assert parse_vtt(render_vtt(segs))[0].text == "Текст."
 
 
-def test_speakers_without_gaps() -> None:
-    with pytest.raises(ValueError, match="без пропусков"):
-        render_vtt([Segment(1.0, 2.0, 1, "а"), Segment(2.0, 3.0, 3, "б")])
+def test_speakers_are_renumbered_without_gaps() -> None:
+    # Спикер 2 сказал только «э-э» — его реплика исчезла, Спикер 3 становится Спикером 2.
+    segs = [Segment(1.0, 2.0, 1, "Начнём."), Segment(2.0, 3.0, 2, "Э-э..."), Segment(3.0, 4.0, 3, "Вопрос.")]
+    assert [c.speaker for c in parse_vtt(render_vtt(segs))] == [1, 2]
+    assert "Спикер 3" not in txt(segs)
+    # Номера — по первому появлению среди оставшихся реплик, даже если на входе они в другом порядке.
+    assert [c.speaker for c in parse_vtt(render_vtt([Segment(1.0, 2.0, 5, "а б"), Segment(2.0, 3.0, 2, "в")]))] == [
+        1,
+        2,
+    ]
     with pytest.raises(ValueError):
         render_vtt([Segment(1.0, 2.0, 0, "а")])
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        # Реальная фраза из проверки на сервере (22.10): заполнители в начале и в середине.
+        ("А-а, его, э-э, на него обрушивается критика.", "Его, на него обрушивается критика."),
+        ("А-а критических точек, э-э которые, значит, возникают.", "Критических точек, которые, значит, возникают."),
+        ("Э-э, в этом случае появляются отчёты.", "В этом случае появляются отчёты."),
+        ("Итак. Э-э, следующий момент.", "Итак. Следующий момент."),
+        ("Это, м-м-м, важно, эээ, понимать.", "Это, важно, понимать."),
+        ("Хм, интересно. Ммм... да.", "Интересно. Да."),
+        ("Тут эм вот так.", "Тут вот так."),
+        # Союзы, предлоги и обычные слова остаются.
+        ("А можно уточнить? О чём речь, у кого и к чему?", "А можно уточнить? О чём речь, у кого и к чему?"),
+        ("Ну вот, значит, эмоции и мммодель.", "Ну вот, значит, эмоции и мммодель."),
+        ("Э-это аа-группа.", "Э-это аа-группа."),
+        ("Э-э.", ""),
+    ],
+)
+def test_remove_fillers(raw: str, clean: str) -> None:
+    assert remove_fillers(raw) == clean
+
+
+def test_fillers_removed_in_both_files() -> None:
+    segs = [Segment(1.0, 4.0, 1, "А-а, его, э-э, на него обрушивается критика."), Segment(5.0, 6.0, 2, "Э-э...")]
+    vtt, text = render_vtt(segs), txt(segs)
+    for out in (vtt, text):
+        assert "а-а" not in out.lower() and "э-э" not in out.lower()
+    assert "<v Спикер 1>Его, на него обрушивается критика." in vtt
+    assert "[00:00:01] Спикер 1: Его, на него обрушивается критика." in text
+    assert "Спикер 2" not in vtt + text
+
+
+def test_only_fillers_is_empty_result() -> None:
+    with pytest.raises(ValueError):
+        render_vtt([Segment(1.0, 2.0, 1, "Э-э, м-м...")])
 
 
 def test_voices_are_only_speaker_n() -> None:
