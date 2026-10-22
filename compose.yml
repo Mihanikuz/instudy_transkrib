@@ -1,0 +1,10 @@
+# Заглушка: GPU, read_only, тома models (ro) и data, healthcheck, сервис загрузки моделей — наполнит T-7
+# (docs/tasks/T-7.md, docs/architecture.md «Развёртывание»). Портов наружу нет и не будет.
+services:
+  transkrib:
+    build: .
+    image: instudy-transkrib:local
+    restart: "no"
+    environment:
+      INSTUDY_API_URL: ${INSTUDY_API_URL:-}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}

@@ -1,0 +1,7 @@
+# Зависимости демона без GPU-стека (torch, pyannote, GigaAM добавит T-2 в requirements-gpu.txt).
+# Собирается так:
+#   pip-compile --generate-hashes --allow-unsafe -o requirements.txt requirements.in
+httpx==0.28.1
+pydantic==2.14.1
+pydantic-settings==2.16.1
+numpy==2.5.4
