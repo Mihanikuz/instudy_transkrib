@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from tests.instudy_reference import extract_subtitles
+from transkrib.render import build_meta, parse_vtt, render_txt, render_vtt, validate_vtt
+from transkrib.types import Segment
+
+FIXTURES = Path(__file__).parent / "fixtures" / "render"
+ENGINE = "GigaAM v3 e2e RNNT, pyannote community-1"
+
+# 3 спикера, 7 сегментов: пауза > 60 с (сегмент 5) и абзац > 180 с (сегмент 6) у спикера 1.
+SCENARIO = [
+    Segment(3.12, 9.86, 1, "Добрый день, коллеги. Сегодня продолжаем тему внимания."),
+    Segment(10.2, 14.05, 2, "А можно уточнить про прошлое задание?"),
+    Segment(14.5, 22.0, 1, "Да,  конечно .  Задание было про « селективное внимание » ."),
+    Segment(23.0, 45.0, 1, "Начнём с модели фильтра Бродбента."),
+    Segment(120.0, 140.0, 1, "После перерыва продолжим."),
+    Segment(141.0, 301.5, 1, "Модель ослабления Трейсман отличается тем, что канал не отсекается полностью."),
+    Segment(302.0, 306.5, 3, "Спасибо, всё понятно."),
+]
+
+
+def golden(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def txt(segments: list[Segment]) -> str:
+    return render_txt(segments, discipline="Общая психология", date=date(2026, 9, 29), engine_line=ENGINE)
+
+
+def test_vtt_matches_golden_file() -> None:
+    assert render_vtt(SCENARIO).encode("utf-8") == golden("lecture.vtt")
+
+
+def test_txt_matches_golden_file() -> None:
+    assert txt(SCENARIO).encode("utf-8") == golden("lecture.txt")
+
+
+@pytest.mark.parametrize("render", [render_vtt, txt])
+def test_utf8_without_bom_lf_and_final_newline(render) -> None:
+    out = render(SCENARIO)
+    raw = out.encode("utf-8")
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert "\r" not in out
+    assert out.endswith("\n") and not out.endswith("\n\n")
+
+
+def test_txt_paragraphs() -> None:
+    lines = [ln for ln in txt(SCENARIO).split("\n") if ln.startswith("[")]
+    assert [ln.split(":", 3)[2].split("]")[1].strip() for ln in lines] == [
+        "Спикер 1",
+        "Спикер 2",
+        "Спикер 1",  # сегменты 3–4 склеены
+        "Спикер 1",  # пауза 75 с
+        "Спикер 1",  # абзац с 120 с длиннее 180 с
+        "Спикер 3",
+    ]
+    assert lines[2].startswith("[00:00:14] Спикер 1: Да, конечно. Задание было про «селективное внимание». Начнём")
+
+
+def test_five_hour_timecodes() -> None:
+    seg = [Segment(5 * 3600 + 0.5, 5 * 3600 + 3.25, 1, "Конец записи.")]
+    assert "05:00:00.500 --> 05:00:03.250" in render_vtt(seg)
+    assert "[05:00:00] Спикер 1: Конец записи." in txt(seg)
+
+
+def test_escaping_in_vtt_but_not_in_txt() -> None:
+    seg = [Segment(1.0, 2.0, 1, "<script>alert(1)</script> & co --> x")]
+    vtt = render_vtt(seg)
+    assert "<v Спикер 1>&lt;script&gt;alert(1)&lt;/script&gt; &amp; co --&gt; x" in vtt
+    assert "<script>" not in vtt.split("<v Спикер 1>", 1)[1]
+    assert "Спикер 1: <script>alert(1)</script> & co --> x" in txt(seg)
+
+
+def test_empty_result_is_an_error() -> None:
+    for render in (render_vtt, txt):
+        with pytest.raises(ValueError):
+            render([])
+        with pytest.raises(ValueError):
+            render([Segment(1.0, 2.0, 1, "   ")])
+
+
+def test_empty_segments_are_skipped() -> None:
+    segs = [Segment(1.0, 2.0, 1, ""), Segment(2.0, 3.0, 1, "Текст.")]
+    assert parse_vtt(render_vtt(segs))[0].text == "Текст."
+
+
+def test_speakers_without_gaps() -> None:
+    with pytest.raises(ValueError, match="без пропусков"):
+        render_vtt([Segment(1.0, 2.0, 1, "а"), Segment(2.0, 3.0, 3, "б")])
+    with pytest.raises(ValueError):
+        render_vtt([Segment(1.0, 2.0, 0, "а")])
+
+
+def test_voices_are_only_speaker_n() -> None:
+    for cue in parse_vtt(render_vtt(SCENARIO)):
+        assert cue.speaker >= 1
+    assert {line.split(">")[0] for line in render_vtt(SCENARIO).split("\n") if line.startswith("<v ")} == {
+        "<v Спикер 1",
+        "<v Спикер 2",
+        "<v Спикер 3",
+    }
+
+
+def test_overlap_is_trimmed() -> None:
+    segs = [Segment(1.0, 5.0, 1, "раз"), Segment(4.0, 6.0, 2, "два")]
+    cues = parse_vtt(render_vtt(segs))
+    assert (cues[0].end_ms, cues[1].start_ms) == (4000, 4000)
+
+
+def test_unsorted_input_is_sorted() -> None:
+    cues = parse_vtt(render_vtt(list(reversed(SCENARIO))))
+    assert [c.start_ms for c in cues] == sorted(c.start_ms for c in cues)
+
+
+def test_bad_times_rejected() -> None:
+    with pytest.raises(ValueError):
+        render_vtt([Segment(2.0, 2.0, 1, "а")])
+    with pytest.raises(ValueError):
+        render_vtt([Segment(-1.0, 2.0, 1, "а")])
+
+
+def test_validate_vtt_roundtrip() -> None:
+    validate_vtt(render_vtt(SCENARIO), SCENARIO)
+    with pytest.raises(ValueError):
+        validate_vtt(render_vtt(SCENARIO[:-1]), SCENARIO)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        "﻿WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<v Спикер 1>а\n",
+        "WEBVTT\r\n\r\n1\r\n00:00:01.000 --> 00:00:02.000\r\n<v Спикер 1>а\r\n",
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<v Анна>а\n",
+        "WEBVTT\n\n1\n00:00:02.000 --> 00:00:01.000\n<v Спикер 1>а\n",
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<v Спикер 1><b>а</b>\n",
+        "WEBVTT\n",
+    ],
+)
+def test_parse_vtt_rejects_broken_files(broken: str) -> None:
+    with pytest.raises(ValueError):
+        parse_vtt(broken)
+
+
+def test_instudy_understands_our_vtt() -> None:
+    # Как instudy (BE-7) покажет текст для «Открыть», если возьмёт его из .vtt: голоса и текст без тегов.
+    text = extract_subtitles(render_vtt(SCENARIO))
+    assert text.startswith("Спикер 1: Добрый день, коллеги.")
+    assert "\nСпикер 2: А можно уточнить про прошлое задание?" in text
+    assert "\nСпикер 3: Спасибо, всё понятно." in text
+    assert "-->" not in text and "<v" not in text
+
+
+def test_instudy_unescapes_vtt_entities() -> None:
+    text = extract_subtitles(render_vtt([Segment(1.0, 2.0, 1, "a < b & c")]))
+    assert text == "Спикер 1: a < b & c"
+
+
+def test_build_meta() -> None:
+    meta = build_meta(
+        server="instudy_transkrib 0.1.0",
+        asr="gigaam v3_e2e_rnnt @abc",
+        diarization="pyannote/speaker-diarization-community-1",
+        audio_duration_sec=17940.4,
+        processing_sec=911.6,
+        speakers=4,
+        segments=1873,
+    )
+    assert meta == {
+        "server": "instudy_transkrib 0.1.0",
+        "asr": "gigaam v3_e2e_rnnt @abc",
+        "diarization": "pyannote/speaker-diarization-community-1",
+        "audioDurationSec": 17940,
+        "processingSec": 912,
+        "speakers": 4,
+        "segments": 1873,
+    }
+
+
+def test_date_as_iso_string() -> None:
+    out = render_txt(SCENARIO, discipline="  Общая  психология ", date="2026-09-29", engine_line=ENGINE)
+    assert out.startswith("Общая психология — 29.09.2026\nАвтотранскрипт: GigaAM")
