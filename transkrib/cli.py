@@ -1,30 +1,40 @@
 """CLI: python -m transkrib.cli <команда>.
 
-T-1 — version; T-2 — models-check, models-import, models-download; T-5 — run-file. Дальше добавит T-6
-(status, pause, resume, check, health).
+T-1 — version; T-2 — models-check, models-import, models-download; T-5 — run-file;
+T-6 — status, pause, resume, check, health.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from transkrib import __version__, models_store
-from transkrib.config import ConfigError, Settings, load_settings
+from transkrib.config import ConfigError, Settings, load_daemon_settings, load_settings
+from transkrib.state import PAUSE_FILE, parse_iso, read_state
+
+HEALTH_MAX_AGE_SEC = 180
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m transkrib.cli", description="Управление сервером транскрибации")
     sub = parser.add_subparsers(dest="command", required=True, metavar="КОМАНДА")
     sub.add_parser("version", help="версия сервера")
+    sub.add_parser("status", help="что делает демон (из state.json)")
+    sub.add_parser("pause", help="не брать новые работы (текущая доработает)")
+    sub.add_parser("resume", help="снова брать работы")
+    sub.add_parser("check", help="проверить instudy (health), модели и GPU")
+    sub.add_parser("health", help=f"код 0, если демон жив (heartbeat свежее {HEALTH_MAX_AGE_SEC} с) — для Docker")
 
     check = sub.add_parser("models-check", help="проверить модели на диске (без сети)")
     check.add_argument("--deep", action="store_true", help="пересчитать хэши файлов (долго)")
@@ -70,9 +80,6 @@ def cmd_models_download() -> int:
     return cmd_models_check(deep=False)
 
 
-ENGINE_LINE = "GigaAM v3 e2e RNNT, pyannote community-1"
-
-
 def make_models(settings: Settings) -> tuple[Any, Any]:
     """Настоящие модели (CUDA). Тесты подменяют эту функцию фейками."""
     from transkrib.asr import GigaAMRecognizer
@@ -115,7 +122,7 @@ class _StageReport:
 def cmd_run_file(audio_path: Path, out: Path | None) -> int:
     from transkrib.log import setup_logging
     from transkrib.pipeline import run
-    from transkrib.render import build_meta, render_txt, render_vtt, validate_vtt
+    from transkrib.render import ENGINE_LINE, build_meta, render_txt, render_vtt, validate_vtt
     from transkrib.types import PipelineCancelled, PipelineError
 
     settings = load_settings()
@@ -180,12 +187,147 @@ def cmd_run_file(audio_path: Path, out: Path | None) -> int:
     return 0
 
 
+def _age_sec(value: str | None, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        return (now - parse_iso(value)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def cmd_status(data_dir: Path, now: datetime | None = None) -> int:
+    now = now or datetime.now(UTC)
+    paused = (data_dir / PAUSE_FILE).exists()
+    state = read_state(data_dir)
+    if state is None:
+        print(f"Демон не запущен или ещё не записал {data_dir}/state.json")
+        if paused:
+            print("Пауза: включена (файл PAUSE)")
+        return 1
+    age = _age_sec(state.get("heartbeat_at"), now)
+    alive = age is not None and age <= HEALTH_MAX_AGE_SEC
+    status = state.get("status", "?")
+    reason = state.get("reason")
+    lines = [
+        f"Демон: {'жив' if alive else 'НЕ ОТВЕЧАЕТ'} (pid {state.get('pid')}, версия {state.get('version')}, "
+        f"запущен {state.get('started_at')}, отметка {round(age) if age is not None else '?'} с назад)",
+        f"Состояние: {status}" + (f" ({reason})" if reason else ""),
+        f"Пауза: {'включена (файл PAUSE)' if paused else 'нет'}",
+    ]
+    job = state.get("job")
+    if isinstance(job, dict):
+        progress = job.get("progress")
+        pct = f"{float(progress) * 100:.0f} %" if isinstance(progress, int | float) else "?"
+        lines.append(
+            f"Работа: #{job.get('id')} (день {job.get('dayId')}, {job.get('date')}), этап {job.get('stage')} {pct}, "
+            f"начата {job.get('started_at')}"
+        )
+    counters = state.get("counters") or {}
+    lines.append(
+        "С запуска: готово {done}, отказов {failed}, пропущено {skipped}, отменено {cancelled}".format(
+            **{k: counters.get(k, 0) for k in ("done", "failed", "skipped", "cancelled")}
+        )
+    )
+    last = state.get("last_error")
+    if isinstance(last, dict):
+        lines.append(f"Последняя ошибка: {last.get('code')} в {last.get('at')}")
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_pause(data_dir: Path) -> int:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / PAUSE_FILE).touch()
+    print("Пауза включена: новые работы не берутся, текущая доработает")
+    return 0
+
+
+def cmd_resume(data_dir: Path) -> int:
+    (data_dir / PAUSE_FILE).unlink(missing_ok=True)
+    print("Пауза снята: демон возьмёт работу при следующем опросе")
+    return 0
+
+
+def cmd_health(data_dir: Path, now: datetime | None = None) -> int:
+    state = read_state(data_dir)
+    age = _age_sec(state.get("heartbeat_at") if state else None, now or datetime.now(UTC))
+    return 0 if age is not None and -60 <= age <= HEALTH_MAX_AGE_SEC else 1
+
+
+def _check_instudy() -> tuple[bool, str]:
+    from transkrib.client import ClientError, InstudyClient, Unauthorized
+    from transkrib.log import register_secret
+
+    try:
+        settings = load_daemon_settings()
+    except ConfigError as exc:
+        return False, str(exc)
+    for secret in settings.secret_values():
+        register_secret(secret)
+    token = settings.service_token.get_secret_value() if settings.service_token else ""
+    try:
+        with InstudyClient(
+            settings.instudy_api_url or "",
+            token,
+            max_audio_bytes=settings.max_audio_bytes,
+            max_audio_sec=settings.max_audio_sec,
+        ) as client:
+            data = client.health()
+    except Unauthorized:
+        return False, "токен отклонён (401) — нужен новый SERVICE_TOKEN"
+    except ClientError as exc:
+        return False, str(exc)
+    return True, f"ok, клиент {data.get('client', '?')}, время сервера {data.get('serverTime', '?')}"
+
+
+def _check_gpu() -> tuple[bool | None, str]:
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return None, "nvidia-smi не найден — пропуск"
+    query = "--query-gpu=name,driver_version,memory.used,memory.total"
+    try:
+        res = subprocess.run(  # noqa: S603 — путь из which, аргументы — константы
+            [exe, query, "--format=csv,noheader"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"nvidia-smi не отработал: {type(exc).__name__}"
+    if res.returncode != 0:
+        return False, (res.stderr or res.stdout).strip()[:300] or f"код {res.returncode}"
+    return True, res.stdout.strip()
+
+
+def cmd_check() -> int:
+    ok = True
+    instudy_ok, instudy_msg = _check_instudy()
+    print(f"instudy: {instudy_msg}")
+    ok &= instudy_ok
+    models_dir = load_settings().models_dir
+    problems = models_store.check(models_dir)
+    print(f"Модели ({models_dir}): " + ("ok" if not problems else "; ".join(str(p) for p in problems)))
+    ok &= not problems
+    gpu_ok, gpu_msg = _check_gpu()
+    print(f"GPU: {gpu_msg}")
+    ok &= gpu_ok is not False
+    return 0 if ok else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "version":
             print(f"instudy_transkrib {__version__}")
             return 0
+        if args.command == "status":
+            return cmd_status(load_settings().data_dir)
+        if args.command == "pause":
+            return cmd_pause(load_settings().data_dir)
+        if args.command == "resume":
+            return cmd_resume(load_settings().data_dir)
+        if args.command == "health":
+            return cmd_health(load_settings().data_dir)
+        if args.command == "check":
+            return cmd_check()
         if args.command == "models-check":
             return cmd_models_check(args.deep)
         if args.command == "models-import":
