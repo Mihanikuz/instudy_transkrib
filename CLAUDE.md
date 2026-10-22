@@ -6,12 +6,12 @@
 
 | Что | Где | Кто меняет |
 | --- | --- | --- |
-| Контракт с instudy | `docs/contract.md` (черновик) → после слияния BE-15…BE-17 в instudy — раздел «Сервисный API» в `instudy/docs/api.md` | Только задачи, где это сказано явно (T-4, T-9) |
+| Контракт с instudy | `docs/contract.md` (черновик) → после реализации сервисного API в instudy — `instudy/docs/transcription-api.md` | Только задачи, где это сказано явно (T-4, T-9) |
 | Архитектура | `docs/architecture.md` | Только задачи, где это сказано явно |
 | Принятые решения | `docs/decisions/*.md` | Только человек |
 | План, волны, статусы | `docs/plan.md` | Оркестратор |
 
-Если код и документ расходятся, а задача не разрешает менять документ — не «чини» молча, а опиши расхождение в PR. Если `docs/contract.md` расходится с `instudy/docs/api.md` — прав instudy; опиши расхождение в PR.
+Если код и документ расходятся, а задача не разрешает менять документ — не «чини» молча, а опиши расхождение в PR. Если `docs/contract.md` расходится с `instudy/docs/transcription-api.md` — прав instudy; опиши расхождение в PR.
 
 ## Зафиксировано (не пересматривать без человека)
 
@@ -23,7 +23,7 @@
 
 ## Стек и раскладка
 
-- Python 3.12 (если колёса torch/pyannote/GigaAM не встают — 3.11, как в gigascribe; решение фиксируется в T-1). torch/torchaudio под CUDA 12.8, pyannote.audio 4.x, GigaAM из git с закреплённым коммитом, httpx, pydantic-settings.
+- Python 3.12 (проверено в T-1: колёса torch cu128, torchcodec, pyannote.audio 4.x и GigaAM поддерживают 3.12). torch/torchaudio под CUDA 12.8, pyannote.audio 4.x, GigaAM из git с закреплённым коммитом, httpx, pydantic-settings.
 - Пакет `transkrib/`, точки входа: `python -m transkrib` (демон) и `python -m transkrib.cli` (CLI).
 - Модули: `config` · `log` · `types` · `client` (instudy) · `audio` (ffmpeg) · `diarize` · `asr` · `segment` · `pipeline` · `render` · `daemon` · `state` · `models_store` · `cli`.
 - `asr`, `diarize` и всё, что импортирует torch, gigaam или pyannote, — за интерфейсами (`Protocol`), чтобы остальной код и тесты работали без GPU и без этих пакетов. Тяжёлые импорты — только внутри методов `load()`.

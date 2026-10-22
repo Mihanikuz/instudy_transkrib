@@ -111,7 +111,7 @@ transkrib/
     results/<job_id>/      # копии результатов, RESULTS_KEEP_DAYS дней
 ```
 
-- Образ: `python:3.12-slim-bookworm` (закреплён по digest) + ffmpeg + колёса torch cu128 + pyannote.audio 4.x + GigaAM (коммит закреплён), зависимости с хэшами.
+- Образ: `python:3.12-slim-bookworm` (закреплён по digest) + ffmpeg + колёса torch cu128 + pyannote.audio 4.0.x + GigaAM (коммит закреплён), зависимости с хэшами. Связку версий выбирает T-2 по рекомендации GigaAM.
 - `compose.yml`: один сервис `transkrib`, `gpus: all`, `restart: unless-stopped`, `user: 10001`, `read_only: true`, `tmpfs: /tmp`, без `ports:`, `stop_grace_period: 45s`, healthcheck — `python -m transkrib.cli health` (свежесть `state.json` < 3 минут).
 - Логи — JSON в stdout, ротация средствами Docker (`json-file`, 10 МБ × 5).
 
