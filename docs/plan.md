@@ -32,7 +32,7 @@ Oct 22, 2026 · @Mikhail
 | T-4 | 2 | Клиент сервисного API instudy и фейковый instudy | слита | [#3](https://github.com/Mihanikuz/instudy_transkrib/pull/3) |
 | T-5 | 3 | Конвейер: аудио, нарезка, спикеры, ASR, отмена | слита | [#5](https://github.com/Mihanikuz/instudy_transkrib/pull/5) |
 | T-6 | 4 | Демон: аренда, heartbeat, результат, fail, сигналы, CLI | слита | [#7](https://github.com/Mihanikuz/instudy_transkrib/pull/7) |
-| T-6a | 4 | Демон: защита попыток дней от неисправностей сервера (модели не грузятся, предохранитель) | не начата | — |
+| T-6a | 4 | Демон: защита попыток дней от неисправностей сервера (модели не грузятся, предохранитель) | слита | [#10](https://github.com/Mihanikuz/instudy_transkrib/pull/10) |
 | — | — | Рендер: удаление заполнителей (решение 22.10) | слита | [#6](https://github.com/Mihanikuz/instudy_transkrib/pull/6) |
 | — | — | Отчёт: сравнение моделей (`docs/experiments/2026-10-22-asr-models.md`) | слита | [#8](https://github.com/Mihanikuz/instudy_transkrib/pull/8) |
 | T-7 | 5 | Docker-образ, compose, README по установке и обновлению | не начата | — |
