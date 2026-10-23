@@ -478,6 +478,7 @@ def test_state_store_atomic_and_fields(tmp_path: Path) -> None:
         "heartbeat_at",
         "status",
         "reason",
+        "next_check_at",
         "job",
         "counters",
         "last_error",

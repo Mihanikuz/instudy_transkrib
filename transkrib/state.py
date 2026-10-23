@@ -89,6 +89,7 @@ class StateStore:
             "heartbeat_at": started,
             "status": STATUS_IDLE,
             "reason": None,
+            "next_check_at": None,  # когда демон снова проверит модели (статус error: models_load / model_breaker)
             "job": None,
             "counters": dict.fromkeys(COUNTERS, 0),
             "last_error": None,
@@ -112,11 +113,17 @@ class StateStore:
         with self._lock:
             return parse_iso(self._state["heartbeat_at"])
 
-    def set_status(self, status: str, reason: str | None = None) -> None:
+    def set_status(self, status: str, reason: str | None = None, *, next_check_at: datetime | None = None) -> None:
         with self._lock:
-            if self._state["status"] == status and self._state["reason"] == reason:
+            next_check = iso(next_check_at) if next_check_at is not None else None
+            if (self._state["status"], self._state["reason"], self._state["next_check_at"]) == (
+                status,
+                reason,
+                next_check,
+            ):
                 return
             self._state["status"], self._state["reason"] = status, reason
+            self._state["next_check_at"] = next_check
             self._write()
 
     def error(self, code: str) -> None:
@@ -128,6 +135,7 @@ class StateStore:
     def start_job(self, job_id: int, day_id: int, job_date: date) -> None:
         with self._lock:
             self._state["status"], self._state["reason"] = STATUS_WORKING, None
+            self._state["next_check_at"] = None
             self._state["job"] = {
                 "id": int(job_id),
                 "dayId": int(day_id),
@@ -156,4 +164,5 @@ class StateStore:
             self._state["counters"][outcome] += 1
             self._state["job"] = None
             self._state["status"], self._state["reason"] = STATUS_IDLE, None
+            self._state["next_check_at"] = None
             self._write()

@@ -44,10 +44,11 @@ from transkrib.client import (
     Unauthorized,
 )
 from transkrib.config import Settings
+from transkrib.pipeline import empty_cuda_cache, load_model
 from transkrib.pipeline import run as run_pipeline
 from transkrib.render import ENGINE_LINE, build_meta, render_txt, render_vtt, validate_vtt
 from transkrib.state import PAUSE_FILE, STATUS_ERROR, STATUS_IDLE, STATUS_PAUSED, StateStore, write_json_atomic
-from transkrib.types import PipelineCancelled, PipelineError
+from transkrib.types import PipelineCancelled, PipelineError, ServerFault
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,9 @@ T = TypeVar("T")
 BACKOFF_START_SEC = 5.0
 BACKOFF_MAX_SEC = 300.0
 UNAUTHORIZED_RETRY_SEC = 600.0  # 401: проверка раз в 10 минут
-MODELS_RETRY_SEC = 600.0
+MODELS_RETRY_SEC = 600.0  # модели не грузятся / сработал предохранитель: проверка раз в 10 минут
+MODEL_BREAKER_LIMIT = 3  # столько работ подряд с model_error/oom — выдача на паузе
+BREAKER_REASONS = frozenset({FailReason.MODEL_ERROR, FailReason.OOM})
 STATE_TOUCH_SEC = 30.0
 CLEANUP_EVERY = timedelta(days=1)
 SHUTDOWN_GRACE_SEC = 20.0  # + fail и уборка — укладываемся в 30 с (stop_grace_period: 45s)
@@ -142,6 +145,9 @@ class Daemon:
         self._current: _JobContext | None = None
         self._signals = 0
         self._last_cleanup: datetime | None = None
+        # Защита попыток дней: неисправность сервера (модели не грузятся, сбои модели подряд) — не вина дня.
+        self._model_block: str | None = None  # models / models_load / model_breaker
+        self._model_failures = 0  # работ подряд, закончившихся model_error или oom
 
     # ----------------------------------------------------------------- сигналы
 
@@ -216,17 +222,69 @@ class Daemon:
         self.work_root.mkdir(parents=True, exist_ok=True)
         self.results_root.mkdir(parents=True, exist_ok=True)
 
+    # ----------------------------------------------------------------- модели
+
+    def _load_models(self) -> bool:
+        """Проверка «модели грузятся»: load() обеих; при KEEP_MODELS_LOADED=false — сразу выгрузить."""
+        ok = False
+        try:
+            load_model(self.diarizer, "диаризация")
+            load_model(self.recognizer, "ASR")
+            ok = True
+        except ServerFault as exc:
+            logger.critical("Модели не загружаются: работа не берётся", extra={"error": exc.message})
+        finally:
+            if not ok or not self.settings.keep_models_loaded:
+                for model in (self.diarizer, self.recognizer):
+                    try:
+                        model.unload()
+                    except Exception as exc:  # выгрузка после неудачной загрузки — по возможности
+                        logger.warning("Ошибка выгрузки модели", extra={"error": type(exc).__name__})
+                empty_cuda_cache()
+        return ok
+
+    def _check_models(self) -> str | None:
+        """None — модели на месте и грузятся; иначе причина блокировки: models (файлы) или models_load."""
+        problems = self.models_check(self.settings.models_dir)
+        if problems:
+            logger.critical("Модели не готовы: работа не берётся", extra={"problems": [str(p) for p in problems]})
+            return "models"
+        return None if self._load_models() else "models_load"
+
+    def _block(self, reason: str) -> None:
+        """Перестать брать работу до успешной проверки моделей (раз в MODELS_RETRY_SEC)."""
+        self._model_block = reason
+        self.state.error(reason)
+        self._show_block()
+
+    def _show_block(self) -> None:
+        next_check = self.clock.now() + timedelta(seconds=MODELS_RETRY_SEC)
+        self.state.set_status(STATUS_ERROR, self._model_block, next_check_at=next_check)
+
+    def _wait_models(self) -> None:
+        """Блокировка: ждать MODELS_RETRY_SEC и проверить модели; успех снимает блокировку и сбрасывает счётчик."""
+        self._show_block()
+        self._sleep(MODELS_RETRY_SEC)
+        reason = self._check_models()
+        if reason is None:
+            logger.warning("Модели снова загружаются: выдача возобновлена", extra={"was": self._model_block})
+            self._model_block = None
+            self._model_failures = 0
+            self.state.set_status(STATUS_IDLE)
+        else:
+            self._model_block = reason
+            self.state.error(reason)
+
+    # ----------------------------------------------------------------- старт
+
     def _startup(self) -> None:
         self._clean_work()
         self.state.touch()
-        while True:
-            problems = self.models_check(self.settings.models_dir)
-            if not problems:
-                break
-            logger.critical("Модели не готовы: работа не берётся", extra={"problems": [str(p) for p in problems]})
-            self.state.set_status(STATUS_ERROR, "models")
-            self.state.error("models")
-            self._sleep(MODELS_RETRY_SEC)
+        reason = self._check_models()
+        if reason is not None:
+            self._block(reason)
+        while self._model_block is not None:
+            self._wait_models()
         while True:
             try:
                 self._retry(self.client.health, "health")
@@ -281,6 +339,9 @@ class Daemon:
     def iteration(self) -> None:
         """Одна итерация цикла. Остановка → _Stop."""
         self._maybe_cleanup()
+        if self._model_block is not None:
+            self._wait_models()
+            return
         reason = self._blocked_reason()
         if reason is not None:
             self.state.set_status(STATUS_PAUSED, reason)
@@ -452,6 +513,8 @@ class Daemon:
         heartbeat.start()
         outcome = "failed"
         fail: tuple[FailReason, str] | None = None
+        server_fault = False
+        closed = False  # 202 или 409: запись прошла через модели — предохранитель сбрасывается
         try:
             try:
                 rendered = self._run_worker(ctx, job_dir)
@@ -463,10 +526,10 @@ class Daemon:
                 result = self._submit(ctx, rendered)
                 if result is ResultOutcome.ACCEPTED:
                     self._keep_copy(job.id, rendered)
-                    outcome = "done"
+                    outcome, closed = "done", True
                 elif result is ResultOutcome.ALREADY_HAS_TRANSCRIPT:
                     logger.info("У дня уже есть транскрипт (409): работа закрыта", extra={"job_id": job.id})
-                    outcome = "skipped"
+                    outcome, closed = "skipped", True
                 else:
                     logger.info("Работа больше не наша (410)", extra={"job_id": job.id})
                     outcome = "cancelled"
@@ -483,6 +546,14 @@ class Daemon:
                 outcome = "skipped"
             except DownloadFailed as exc:
                 fail = (FailReason.DOWNLOAD_FAILED, str(exc))
+            except ServerFault as exc:
+                # Не вина записи: fail shutdown не засчитывает попытку дня (договор instudy, «fail»).
+                logger.critical(
+                    "Модель не загрузилась посреди работы — неисправность сервера",
+                    extra={"job_id": job.id, "error": exc.message},
+                )
+                fail = (FailReason.SHUTDOWN, "Неисправность сервера: модель не загрузилась")
+                server_fault = True
             except PipelineError as exc:
                 fail = (_fail_reason(exc.reason), exc.message or exc.reason)
             except Rejected as exc:
@@ -513,9 +584,27 @@ class Daemon:
             self._current = None
             self.state.finish_job(outcome)
         logger.info("Работа завершена", extra={"job_id": job.id, "outcome": outcome})
+        self._update_breaker(fail[0] if fail else None, closed=closed, server_fault=server_fault)
         if self.shutdown.is_set():
             raise _Stop()
         return outcome
+
+    def _update_breaker(self, reason: FailReason | None, *, closed: bool, server_fault: bool) -> None:
+        if server_fault:
+            self._block("models_load")
+            return
+        if closed:
+            self._model_failures = 0
+            return
+        if reason not in BREAKER_REASONS:
+            return  # download_failed, decode_failed, no_speech и прочее — не сбой модели
+        self._model_failures += 1
+        if self._model_failures >= MODEL_BREAKER_LIMIT:
+            logger.critical(
+                "Предохранитель: работы подряд закончились сбоем модели — выдача на паузе",
+                extra={"in_a_row": self._model_failures, "retry_in": MODELS_RETRY_SEC},
+            )
+            self._block("model_breaker")
 
 
 # ------------------------------------------------------------------------------- запуск
