@@ -24,10 +24,10 @@ Oct 22, 2026 · @Mikhail
 | ID | Волна | Задача | Статус | PR |
 | --- | --- | --- | --- | --- |
 | T-1 | 1 | Каркас, CI, конфиг, логи | слита | [#1](https://github.com/Mihanikuz/instudy_transkrib/pull/1) |
-| T-2 | 2 | Модели: загрузка, проверка, бэкенды GigaAM и pyannote, GPU-smoke | не начата | — |
-| T-3 | 2 | Рендер `.vtt` и `.txt` | на ревью | — |
-| T-4 | 2 | Клиент сервисного API instudy и фейковый instudy | не начата | — |
-| T-5 | 3 | Конвейер: аудио, нарезка, спикеры, ASR, отмена | не начата | — |
+| T-2 | 2 | Модели: загрузка, проверка, бэкенды GigaAM и pyannote, GPU-smoke | слита | [#4](https://github.com/Mihanikuz/instudy_transkrib/pull/4) |
+| T-3 | 2 | Рендер `.vtt` и `.txt` | слита | [#2](https://github.com/Mihanikuz/instudy_transkrib/pull/2) |
+| T-4 | 2 | Клиент сервисного API instudy и фейковый instudy | слита | [#3](https://github.com/Mihanikuz/instudy_transkrib/pull/3) |
+| T-5 | 3 | Конвейер: аудио, нарезка, спикеры, ASR, отмена | слита | [#5](https://github.com/Mihanikuz/instudy_transkrib/pull/5) |
 | T-6 | 4 | Демон: аренда, heartbeat, результат, fail, сигналы, CLI | не начата | — |
 | T-7 | 5 | Docker-образ, compose, README по установке и обновлению | не начата | — |
 | T-8 | 5 | Замеры и качество на реальных записях | не начата | — |
