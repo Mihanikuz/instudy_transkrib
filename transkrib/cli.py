@@ -24,6 +24,14 @@ from transkrib.config import ConfigError, Settings, load_daemon_settings, load_s
 from transkrib.state import PAUSE_FILE, parse_iso, read_state
 
 HEALTH_MAX_AGE_SEC = 180
+REASON_TEXT = {
+    "pause": "файл PAUSE, cli resume снимет",
+    "low_disk": "мало места на диске",
+    "unauthorized": "instudy отклонил токен (401)",
+    "models": "нет файлов моделей, см. cli models-check",
+    "models_load": "модели не загружаются — CUDA/драйвер? см. cli check",
+    "model_breaker": "предохранитель: несколько работ подряд со сбоем модели",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -212,9 +220,12 @@ def cmd_status(data_dir: Path, now: datetime | None = None) -> int:
     lines = [
         f"Демон: {'жив' if alive else 'НЕ ОТВЕЧАЕТ'} (pid {state.get('pid')}, версия {state.get('version')}, "
         f"запущен {state.get('started_at')}, отметка {round(age) if age is not None else '?'} с назад)",
-        f"Состояние: {status}" + (f" ({reason})" if reason else ""),
+        f"Состояние: {status}"
+        + (f" ({reason}: {REASON_TEXT[reason]})" if reason in REASON_TEXT else f" ({reason})" if reason else ""),
         f"Пауза: {'включена (файл PAUSE)' if paused else 'нет'}",
     ]
+    if state.get("next_check_at"):
+        lines.append(f"Следующая проверка моделей: {state['next_check_at']}")
     job = state.get("job")
     if isinstance(job, dict):
         progress = job.get("progress")

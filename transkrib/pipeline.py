@@ -3,6 +3,7 @@
 Конвейер не знает про instudy: на входе файл, модели за интерфейсами Diarizer/Recognizer, флаг отмены и колбэк
 прогресса; на выходе — сегменты для render или исключение:
 - PipelineError(reason) — reason из docs/contract.md: decode_failed, no_speech, model_error, oom;
+- ServerFault(PipelineError) — модель не загрузилась: неисправность сервера, а не записи (демон не засчитывает попытку);
 - PipelineCancelled — флаг cancel выставлен (проверяется между этапами и перед каждым куском ASR).
 
 torch на уровне модуля не импортируется: CUDA OOM узнаётся по типу/тексту исключения, кэш CUDA чистится через
@@ -25,7 +26,7 @@ from transkrib import audio, segment
 from transkrib.asr import SAMPLE_RATE, Recognizer, is_cuda_oom
 from transkrib.config import Settings, load_settings
 from transkrib.diarize import Diarizer, Turn
-from transkrib.types import PipelineCancelled, PipelineError, Segment
+from transkrib.types import PipelineCancelled, PipelineError, Segment, ServerFault
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,15 @@ def _model_failure(exc: BaseException, stage: str) -> PipelineError:
     return PipelineError("model_error", f"Ошибка модели: {stage} ({type(exc).__name__})")
 
 
+def load_model(model: Diarizer | Recognizer, what: str) -> None:
+    """model.load(); любая ошибка загрузки — неисправность сервера (ServerFault), а не записи."""
+    try:
+        model.load()
+    except Exception as exc:
+        reason = "oom" if is_cuda_oom(exc) else "model_error"
+        raise ServerFault(reason, f"Модель не загрузилась: {what} ({type(exc).__name__})") from exc
+
+
 def prepare_wav(src: Path, work_dir: Path, cancel: threading.Event) -> Path:
     """Готовый WAV 16 кГц моно используется как есть; остальное перекодируется в work_dir/audio.wav."""
     if audio.is_wav16k_mono(src):
@@ -87,7 +97,7 @@ def prepare_wav(src: Path, work_dir: Path, cancel: threading.Event) -> Path:
 
 def _diarize(wav: Path, diarizer: Diarizer, keep_loaded: bool) -> list[Turn]:
     try:
-        diarizer.load()
+        load_model(diarizer, "диаризация")
         return diarizer.diarize(wav)
     except PipelineError:
         raise
@@ -131,10 +141,7 @@ def _recognize(
     texts: list[str | None] = []
     skipped = 0
     try:
-        try:
-            recognizer.load()
-        except Exception as exc:
-            raise _model_failure(exc, "загрузка ASR") from exc
+        load_model(recognizer, "ASR")
         for i, chunk in enumerate(chunks):
             _check_cancel(cancel)
             a, b = int(round(chunk.start * SAMPLE_RATE)), int(round(chunk.end * SAMPLE_RATE))

@@ -27,5 +27,15 @@ class PipelineError(RuntimeError):
         self.message = message
 
 
+class ServerFault(PipelineError):
+    """Неисправность сервера, а не записи: модель не загрузилась (CUDA недоступна, mismatch драйвера, нет файлов).
+
+    reason — model_error или oom (для лога); демон не шлёт этот reason в instudy, чтобы не засчитать попытку дня, —
+    отвечает fail shutdown и перестаёт брать работу, пока модели снова не загрузятся.
+    """
+
+    server_fault = True
+
+
 class PipelineCancelled(Exception):
     """Работу отменили (флаг cancel): аренда отозвана или демон останавливают."""
