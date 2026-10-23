@@ -61,6 +61,8 @@ MODELS_RETRY_SEC = 600.0  # модели не грузятся / сработа�
 MODEL_BREAKER_LIMIT = 3  # столько работ подряд с model_error/oom — выдача на паузе
 BREAKER_REASONS = frozenset({FailReason.MODEL_ERROR, FailReason.OOM})
 STATE_TOUCH_SEC = 30.0
+HEALTH_REFRESH_SEC = 600.0  # пустая очередь: раз в 10 минут обновить paused из health (autotx-pause в instudy)
+CLOCK_SKEW_WARN_SEC = 60.0  # аренда считается по часам instudy
 CLEANUP_EVERY = timedelta(days=1)
 SHUTDOWN_GRACE_SEC = 20.0  # + fail и уборка — укладываемся в 30 с (stop_grace_period: 45s)
 FAIL_ATTEMPTS = 3
@@ -145,6 +147,7 @@ class Daemon:
         self._current: _JobContext | None = None
         self._signals = 0
         self._last_cleanup: datetime | None = None
+        self._last_health: datetime | None = None
         # Защита попыток дней: неисправность сервера (модели не грузятся, сбои модели подряд) — не вина дня.
         self._model_block: str | None = None  # models / models_load / model_breaker
         self._model_failures = 0  # работ подряд, закончившихся model_error или oom
@@ -287,12 +290,45 @@ class Daemon:
             self._wait_models()
         while True:
             try:
-                self._retry(self.client.health, "health")
+                self._note_health(self._retry(self.client.health, "health"))
                 break
             except Unauthorized:
                 self._wait_unauthorized()
         self.state.set_status(STATUS_IDLE)
         logger.info("Демон запущен", extra={"version": __version__})
+
+    # ----------------------------------------------------------------- health instudy
+
+    def _note_health(self, data: dict[str, Any]) -> None:
+        """paused (выдача выключена админом) — в state.json для cli status; расхождение часов — предупреждение."""
+        self._last_health = self.clock.now()
+        paused = self.client.health_paused(data)
+        if paused != self.state.snapshot().get("instudy_paused"):
+            logger.info(
+                "instudy: выдача работ на паузе (autotx-pause)" if paused else "instudy: выдача работ включена",
+                extra={"paused": paused},
+            )
+        self.state.set_instudy_paused(paused)
+        try:
+            server_time = datetime.fromisoformat(str(data.get("serverTime", "")).replace("Z", "+00:00"))
+        except ValueError:
+            return
+        if server_time.tzinfo is None:
+            server_time = server_time.replace(tzinfo=UTC)
+        skew = abs((self.clock.now() - server_time).total_seconds())
+        if skew > CLOCK_SKEW_WARN_SEC:
+            logger.warning("Часы сервера расходятся с instudy", extra={"skew_sec": round(skew)})
+
+    def _refresh_health(self) -> None:
+        """Пустая очередь: не чаще раза в HEALTH_REFRESH_SEC узнать, не на паузе ли выдача. Сбой — только в лог."""
+        now = self.clock.now()
+        if self._last_health is not None and (now - self._last_health).total_seconds() < HEALTH_REFRESH_SEC:
+            return
+        try:
+            self._note_health(self.client.health())
+        except (Transient, RateLimited) as exc:
+            self._last_health = now
+            logger.warning("health instudy не прошёл", extra={"error": str(exc)})
 
     # ----------------------------------------------------------------- уборка результатов
 
@@ -360,6 +396,11 @@ class Daemon:
             return
         if job is None:
             self.state.set_status(STATUS_IDLE)
+            try:
+                self._refresh_health()
+            except Unauthorized:
+                self._wait_unauthorized()
+                return
             self._sleep(self.settings.poll_interval_sec)
             return
         self.process(job)

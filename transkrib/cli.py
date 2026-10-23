@@ -224,6 +224,8 @@ def cmd_status(data_dir: Path, now: datetime | None = None) -> int:
         + (f" ({reason}: {REASON_TEXT[reason]})" if reason in REASON_TEXT else f" ({reason})" if reason else ""),
         f"Пауза: {'включена (файл PAUSE)' if paused else 'нет'}",
     ]
+    if state.get("instudy_paused") is True:
+        lines.append("instudy: выдача работ на паузе (autotx-pause у админа instudy) — не ошибка, опрос продолжается")
     if state.get("next_check_at"):
         lines.append(f"Следующая проверка моделей: {state['next_check_at']}")
     job = state.get("job")
@@ -289,7 +291,12 @@ def _check_instudy() -> tuple[bool, str]:
         return False, "токен отклонён (401) — нужен новый SERVICE_TOKEN"
     except ClientError as exc:
         return False, str(exc)
-    return True, f"ok, клиент {data.get('client', '?')}, время сервера {data.get('serverTime', '?')}"
+    paused = (
+        "; выдача работ на паузе (autotx-pause у админа instudy) — не ошибка, демон ждёт"
+        if InstudyClient.health_paused(data)
+        else ""
+    )
+    return True, f"ok, клиент {data.get('client', '?')}, время сервера {data.get('serverTime', '?')}{paused}"
 
 
 def _check_gpu() -> tuple[bool | None, str]:

@@ -5,13 +5,12 @@ import json
 import logging
 import socket
 import threading
-from email.parser import BytesParser
-from email.policy import HTTP
 from pathlib import Path
 
 import pytest
 
 from tests.fake_instudy import BASE_URL, TOKEN, FakeInstudy
+from tests.instudy_reference import parse_multipart
 from transkrib import log
 from transkrib.client import (
     Cancelled,
@@ -71,18 +70,6 @@ def logs() -> io.StringIO:
     logging.getLogger().removeHandler(handler)
 
 
-def parse_multipart(content_type: str, body: bytes) -> dict[str, tuple[str, bytes]]:
-    msg = BytesParser(policy=HTTP).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + body)
-    parts = {}
-    for part in msg.iter_parts():
-        name = part.get_param("name", header="content-disposition")
-        parts[name] = (
-            part.get_content_type() + (f"; charset={part.get_content_charset()}" if part.get_content_charset() else ""),
-            part.get_payload(decode=True),
-        )
-    return parts
-
-
 # --------------------------------------------------------------------------- работа
 
 
@@ -124,7 +111,17 @@ def test_job_over_duration_limit_is_invalid(client: InstudyClient, fake: FakeIns
 
 @pytest.mark.parametrize(
     "patch",
-    [{"id": -1}, {"dayId": 0}, {"dayId": "412"}, {"audioSizeBytes": 0}, {"date": "вчера"}, {"leaseUntil": None}],
+    [
+        {"id": -1},
+        {"dayId": 0},
+        {"dayId": "412"},
+        {"audioSizeBytes": 0},
+        {"date": "вчера"},
+        {"leaseUntil": None},
+        {"audioSha256": None},
+        {"audioSha256": "abc"},
+        {"audioSha256": "g" * 64},
+    ],
 )
 def test_malformed_job_is_invalid(client: InstudyClient, fake: FakeInstudy, patch: dict) -> None:
     import httpx
@@ -135,8 +132,9 @@ def test_malformed_job_is_invalid(client: InstudyClient, fake: FakeInstudy, patc
         "date": "2026-09-29",
         "discipline": "x",
         "leaseUntil": "2026-10-22T13:00:00Z",
-        "audioUrl": f"{BASE_URL}/api/service/v1/audio/9?exp=1&sig=a",
+        "audioUrl": f"{BASE_URL}/api/service/v1/audio/9?job=7&exp=1&sig=a",
         "audioSizeBytes": 10,
+        "audioSha256": "0" * 64,
     }
     fake.transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"job": {**good, **patch}}))
     c = InstudyClient(BASE_URL, TOKEN, max_audio_bytes=MiB, max_audio_sec=60, transport=fake.transport)
@@ -154,6 +152,7 @@ def test_audio_url_on_foreign_host_is_invalid(client: InstudyClient, fake: FakeI
         "leaseUntil": "2026-10-22T13:00:00Z",
         "audioUrl": "https://evil.example/a.m4a",
         "audioSizeBytes": 10,
+        "audioSha256": "0" * 64,
     }
     t = httpx.MockTransport(lambda r: httpx.Response(200, json={"job": job}))
     c = InstudyClient(BASE_URL, TOKEN, max_audio_bytes=MiB, max_audio_sec=60, transport=t)
@@ -298,7 +297,7 @@ def test_submit_result_accepted_and_multipart(client: InstudyClient, fake: FakeI
     job = client.next_job()
     vtt = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<v Спикер 1>Привет.\n".encode()
     txt = "Общая психология — 29.09.2026\n".encode()
-    meta = {"speakers": 1, "server": "instudy_transkrib 0.1.0"}
+    meta = {"speakers": 1, "server": "instudy_transkrib 0.1.0", "asr": "fake-asr", "diarization": "fake"}
     assert client.submit_result(job.id, vtt, txt, meta) is ResultOutcome.ACCEPTED
     parts = parse_multipart(fake.jobs[1].result["content_type"], fake.jobs[1].result["raw"])
     assert set(parts) == {"vtt", "txt", "meta"}
@@ -356,9 +355,11 @@ def test_fail_retryable_from_table_and_override(client: InstudyClient, fake: Fak
     job = client.next_job()
     client.fail(job.id, FailReason.NO_SPEECH, "тишина")
     assert fake.jobs[1].fails[0]["retryable"] is False
+    assert fake.jobs[1].status == "failed"  # retryable: false — работа сразу провалена
+    fake.add_job(2)
     job = client.next_job()
     client.fail(job.id, FailReason.NO_SPEECH, "тишина", retryable=True)
-    assert fake.jobs[1].fails[1]["retryable"] is True
+    assert fake.jobs[2].fails[0]["retryable"] is True
 
 
 def test_fail_on_lost_lease_returns_false(client: InstudyClient, fake: FakeInstudy) -> None:
@@ -406,3 +407,147 @@ def test_no_secrets_in_logs_or_exceptions(
 def test_rejects_plain_http() -> None:
     with pytest.raises(ValueError):
         InstudyClient("http://api.example.ru", TOKEN, max_audio_bytes=1, max_audio_sec=1)
+
+
+# ------------------------------------------------------------------ итоговый договор instudy (T-9)
+
+
+def test_job_carries_sha256(client: InstudyClient, fake: FakeInstudy) -> None:
+    import hashlib
+
+    fake.add_job(1)
+    job = client.next_job()
+    assert job.audio_sha256 == hashlib.sha256(fake.jobs[1].audio).hexdigest()
+    assert "job=1&" in job.audio_url  # ссылка instudy — с номером работы; берётся как есть
+
+
+def test_job_sha256_is_normalized_to_lowercase(client: InstudyClient, fake: FakeInstudy) -> None:
+    fake.add_job(1).sha_override = "AB" * 32
+    assert client.next_job().audio_sha256 == "ab" * 32
+
+
+def test_download_sha256_mismatch_fails_and_removes_file(
+    client: InstudyClient, fake: FakeInstudy, tmp_path: Path
+) -> None:
+    fake.add_job(1).sha_override = "0" * 64
+    job = client.next_job()
+    dest = tmp_path / "audio.m4a"
+    with pytest.raises(DownloadFailed, match="SHA-256"):
+        client.download(job, dest)
+    assert not dest.exists()
+
+
+def test_download_sha256_checked_after_resume(client: InstudyClient, fake: FakeInstudy, tmp_path: Path) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    fake.break_download_at = [1_000_000]
+    assert client.download(job, tmp_path / "audio.m4a").read_bytes() == fake.jobs[1].audio
+
+
+def test_heartbeat_manual_transcript_is_410(client: InstudyClient, fake: FakeInstudy) -> None:
+    """Договор: потеря работы — только 410 с причиной в detail (409 обрабатывается для совместимости — выше)."""
+    fake.add_job(1)
+    job = client.next_job()
+    fake.jobs[1].manual_transcript = True
+    with pytest.raises(LeaseLost, match="410"):
+        client.heartbeat(job.id)
+
+
+@pytest.mark.parametrize("status", [409, 410])
+def test_fail_on_lost_work_returns_false(client: InstudyClient, fake: FakeInstudy, status: int) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    fake.fail_next("POST fail", status)
+    assert client.fail(job.id, FailReason.OOM, "oom") is False
+
+
+def test_fail_after_lease_expiry_is_410(client: InstudyClient, fake: FakeInstudy) -> None:
+    import httpx
+
+    fake.add_job(1)
+    job = client.next_job()
+    fake.advance(hours=1)
+    seen: list[int] = []
+    original = fake.handle
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = original(request)
+        seen.append(response.status_code)
+        return response
+
+    c = InstudyClient(BASE_URL, TOKEN, max_audio_bytes=MiB, max_audio_sec=60, transport=httpx.MockTransport(spy))
+    assert c.fail(job.id, FailReason.OOM, "oom") is False
+    assert seen == [410]
+
+
+def test_result_400_is_transient(client: InstudyClient, fake: FakeInstudy) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    fake.fail_next("POST result", 400)
+    with pytest.raises(Transient, match="400"):
+        client.submit_result(job.id, b"v", b"t", {})
+
+
+def test_result_202_body_with_transcript_id(client: InstudyClient, fake: FakeInstudy) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    vtt = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<v Спикер 1>Привет.\n".encode()
+    meta = {"server": "s", "asr": "a", "diarization": "d", "speakers": 1}
+    assert client.submit_result(job.id, vtt, b"text", meta) is ResultOutcome.ACCEPTED
+    assert fake.jobs[1].transcript_id == 1534
+
+
+@pytest.mark.parametrize("body", [b'{"transcriptId": 1534}', b"", b"not json", b'{"other": 1}'])
+def test_result_202_body_is_ignored(body: bytes) -> None:
+    import httpx
+
+    t = httpx.MockTransport(lambda r: httpx.Response(202, content=body))
+    c = InstudyClient(BASE_URL, TOKEN, max_audio_bytes=MiB, max_audio_sec=60, transport=t)
+    assert c.submit_result(1, b"v", b"t", {}) is ResultOutcome.ACCEPTED
+
+
+@pytest.mark.parametrize(
+    ("vtt_size", "txt_size", "meta_pad"),
+    [(10 * MiB + 1, 10, 0), (10, 10 * MiB + 1, 0), (10, 10, 5000)],
+)
+def test_result_over_limits_is_not_sent(
+    client: InstudyClient, fake: FakeInstudy, vtt_size: int, txt_size: int, meta_pad: int
+) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    with pytest.raises(Rejected) as err:
+        client.submit_result(job.id, b"v" * vtt_size, b"t" * txt_size, {"pad": "x" * meta_pad})
+    assert err.value.reason is FailReason.RESULT_TOO_LARGE and err.value.status is None
+    assert fake.requests("POST", "/result") == []
+
+
+def test_result_exactly_at_limit_is_sent(client: InstudyClient, fake: FakeInstudy) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    fake.fail_next("POST result", 202)
+    assert client.submit_result(job.id, b"v" * (10 * MiB), b"t" * (10 * MiB), {}) is ResultOutcome.ACCEPTED
+
+
+def test_health_paused(client: InstudyClient, fake: FakeInstudy) -> None:
+    assert InstudyClient.health_paused(client.health()) is False
+    fake.paused = True
+    fake.add_job(1)
+    assert InstudyClient.health_paused(client.health()) is True
+    assert client.next_job() is None  # на паузе jobs/next отвечает 204
+
+
+def test_next_503_is_transient() -> None:
+    import httpx
+
+    t = httpx.MockTransport(lambda r: httpx.Response(503, json={"detail": "Сервисный API не настроен"}))
+    c = InstudyClient(BASE_URL, TOKEN, max_audio_bytes=MiB, max_audio_sec=60, transport=t)
+    with pytest.raises(Transient):
+        c.next_job()
+
+
+def test_audio_link_dies_with_lease(client: InstudyClient, fake: FakeInstudy, tmp_path: Path) -> None:
+    fake.add_job(1)
+    job = client.next_job()
+    fake.advance(minutes=31)  # аренда истекла, срок ссылки (60 мин) — нет: instudy всё равно отвечает 403
+    with pytest.raises(LinkExpired):
+        client.download(job, tmp_path / "audio.m4a")
