@@ -11,7 +11,7 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_daemon_entrypoint_prints_version() -> None:
-    res = run("-m", "transkrib")
+    res = run("-m", "transkrib", "--version")
     assert res.returncode == 0, res.stderr
     assert __version__ in res.stdout
 

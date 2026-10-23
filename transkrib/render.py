@@ -15,6 +15,7 @@ from datetime import date as Date
 from transkrib.types import Segment
 
 SPEAKER_LABEL = "Спикер {n}"
+ENGINE_LINE = "GigaAM v3 e2e RNNT, pyannote community-1"  # вторая строка шапки .txt
 
 PARAGRAPH_GAP_SEC = 60.0  # пауза больше — новый абзац того же спикера
 PARAGRAPH_MAX_SEC = 180.0  # абзац длиннее — новый абзац того же спикера
