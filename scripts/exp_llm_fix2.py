@@ -89,9 +89,12 @@ morph = pymorphy3.MorphAnalyzer()
 # ----------------------------------------------------------------------------- нейросеть
 
 
-def ask(url: str, model: str, prompt: str, think: bool) -> list[tuple[str, str]]:
-    if not (url.startswith("http://127.0.0.1") or url.startswith("http://localhost")):
-        raise ValueError("Ollama — только локальный адрес")
+MAX_TOKENS = 6000  # предел ответа вместе с рассуждением — защита от бесконечного «думания»
+TIMEOUT_SEC = 300  # предел на один запрос; дальше — повтор без рассуждения
+STATS = {"requests": 0, "fallbacks": 0, "tokens": 0}
+
+
+def _call(url: str, model: str, prompt: str, think: bool) -> tuple[str, dict]:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -99,13 +102,36 @@ def ask(url: str, model: str, prompt: str, think: bool) -> list[tuple[str, str]]
         "think": think,
         "stream": False,
         "keep_alive": "30m",
-        "options": {"temperature": 0, "num_ctx": 16384},
+        "options": {"temperature": 0, "num_ctx": 16384, "num_predict": MAX_TOKENS},
     }
-    req = urllib.request.Request(  # noqa: S310 — только локальный http, проверено выше
+    req = urllib.request.Request(  # noqa: S310 — только локальный http, проверено в ask()
         f"{url}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=1800) as resp:  # noqa: S310
-        content = json.load(resp)["message"]["content"]
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:  # noqa: S310
+        data = json.load(resp)
+    return data["message"].get("content", ""), data
+
+
+def ask(url: str, model: str, prompt: str, think: bool) -> list[tuple[str, str]]:
+    if not (url.startswith("http://127.0.0.1") or url.startswith("http://localhost")):
+        raise ValueError("Ollama — только локальный адрес")
+    STATS["requests"] += 1
+    try:
+        content, data = _call(url, model, prompt, think)
+        if think and data.get("done_reason") == "length":
+            raise TimeoutError("упёрлись в предел токенов")
+    except (TimeoutError, OSError) as exc:
+        if not think:
+            print(f"  запрос не удался: {type(exc).__name__}", file=sys.stderr, flush=True)
+            return []
+        print(f"  рассуждение не уложилось ({exc}), повтор без рассуждения", file=sys.stderr, flush=True)
+        STATS["fallbacks"] += 1
+        try:
+            content, data = _call(url, model, prompt, False)
+        except (TimeoutError, OSError) as exc2:
+            print(f"  запрос не удался: {type(exc2).__name__}", file=sys.stderr, flush=True)
+            return []
+    STATS["tokens"] += int(data.get("eval_count") or 0)
     try:
         items = json.loads(content).get("fixes", [])
     except (ValueError, AttributeError):
@@ -279,14 +305,18 @@ def vocab_stage(body: str, extra: set[str], args, log) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global MAX_TOKENS, TIMEOUT_SEC
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("txt", type=Path)
     p.add_argument("--discipline", required=True)
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--model", default="qwen3:30b-a3b")
+    p.add_argument("--model", default="qwen3:14b")
     p.add_argument("--no-think", dest="think", action="store_false")
     p.add_argument("--ollama", default="http://127.0.0.1:11434")
+    p.add_argument("--max-tokens", type=int, default=6000)
+    p.add_argument("--timeout", type=int, default=300)
     args = p.parse_args(argv)
+    MAX_TOKENS, TIMEOUT_SEC = args.max_tokens, args.timeout
 
     lines = args.txt.read_text(encoding="utf-8").split("\n")
     header, body = "\n".join(lines[:3]), "\n".join(lines[3:])
@@ -325,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 "text_replacements": n_text,
                 "vocab_agreed": len(mapping),
                 "vocab_replacements": n_vocab,
+                **STATS,
                 "sec": round(time.monotonic() - started),
                 "out": str(args.out),
                 "fixes": str(tsv),
