@@ -1,21 +1,30 @@
 # GPU-стек: ставится в образ поверх requirements.txt (T-7). Тесты и CI его не ставят.
 #
 # Связка версий — та, что рекомендует последний GigaAM (extra `longform` в его pyproject.toml на коммите ниже):
-# torch 2.10, torchaudio 2.10, torchcodec 0.10, pyannote.audio 4.0.*. Колёса torch/torchaudio — сборка cu128
-# (поддерживает sm_120, RTX 5060 Ti). Запасной вариант, проверенный gigascribe на этой же карте: torch 2.8.0+cu128,
-# torchaudio 2.8.0+cu128, torchcodec 0.7.0.
+# torch 2.10, torchaudio 2.10, torchcodec 0.10, pyannote.audio 4.0.*. Колёса torch с PyPI для Linux x86_64 — та же
+# сборка CUDA 12.8, что и cu128 с download.pytorch.org (в метаданных nvidia-*-cu12==12.8.*, поддерживает sm_120,
+# RTX 5060 Ti), поэтому отдельный индекс PyTorch не нужен и все хэши берутся с PyPI. torchcodec с PyPI — сборка без
+# CUDA: аудио в pyannote идёт уже декодированным массивом, декодер не используется.
+# Запасной вариант, проверенный gigascribe на этой же карте: torch 2.8.0, torchaudio 2.8.0, torchcodec 0.7.0.
 #
-# Файл с хэшами (requirements-gpu.txt) собирает T-7 в среде с доступом к download.pytorch.org:
-#   pip-compile --generate-hashes --allow-unsafe -c constraints-gpu.txt -o requirements-gpu.txt requirements-gpu.in
-# GigaAM ставится отдельной строкой без хэшей (pip не поддерживает --require-hashes для git-зависимостей) —
-# закреплён полным хэшем коммита, это тот же уровень гарантии.
---extra-index-url https://download.pytorch.org/whl/cu128
+# Файл с хэшами (requirements-gpu.txt) собирается так (uv 0.11+, только PyPI):
+#   uv pip compile --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+#     -c constraints-gpu.txt -c requirements.txt -o requirements-gpu.txt requirements-gpu.in
+-c requirements.txt
 
-torch==2.10.0+cu128
-torchaudio==2.10.0+cu128
+torch==2.10.0
+torchaudio==2.10.0
 torchcodec==0.10.0
 pyannote.audio==4.0.7
 
-# GigaAM: последний коммит main на 22.10.2026 (Merge PR #88, 17.08.2026). Хэш продублирован в
-# transkrib/models_store.py (GIGAAM_COMMIT) — маркер готовности модели его проверяет.
-gigaam @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5
+# Зависимости GigaAM — из его pyproject.toml ([project].dependencies) на закреплённом коммите. Сам gigaam ставится
+# отдельно, без зависимостей (requirements-gigaam.txt: pip не поддерживает --require-hashes для git-ссылок), поэтому
+# всё, что ему нужно, должно быть здесь и попасть в файл с хэшами.
+hydra-core==1.3.*
+numpy==2.*
+omegaconf==2.3.*
+onnx==1.19.*
+onnxruntime==1.23.*
+soundfile
+sentencepiece
+tqdm

@@ -253,3 +253,29 @@ def test_cli_status_shows_block_and_next_check(tmp_path: Path, capsys) -> None:
     env.clock.on_wait = on_wait
     env.run()
     assert "models_load" in outputs[0] and "Следующая проверка моделей" in outputs[0]
+
+
+def test_heartbeat_fresh_while_blocked_on_start(tmp_path: Path) -> None:
+    """Тикер работает и до конца старта: healthcheck Docker видит живой процесс, причина — в status."""
+    import time
+
+    from transkrib.state import iso
+
+    recognizer = FlakyLoadRecognizer()
+    recognizer.broken = True
+    env = Env(tmp_path, recognizer=recognizer)
+    fresh: list[bool] = []
+
+    def on_wait(seconds: float) -> None:
+        if len(env.clock.waits) == 1:
+            return  # первый сон: время сдвинулось на 600 с — дальше ждём, что тикер обновит отметку
+        expected = iso(env.clock.now())
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and read_state(env.data)["heartbeat_at"] != expected:
+            time.sleep(0.01)
+        fresh.append(read_state(env.data)["heartbeat_at"] == expected)
+        env.daemon.request_stop()
+
+    env.clock.on_wait = on_wait
+    env.run()
+    assert fresh == [True]

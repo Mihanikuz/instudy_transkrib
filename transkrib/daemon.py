@@ -367,8 +367,10 @@ class Daemon:
     def run(self) -> int:
         ticker = threading.Thread(target=self._ticker, name="state-ticker", daemon=True)
         try:
-            self._startup()
+            # Тикер — до старта: пока модели не грузятся или токен отклонён, heartbeat_at всё равно свежий,
+            # и healthcheck Docker показывает «процесс жив», а причину — status в state.json.
             ticker.start()
+            self._startup()
             while not self.shutdown.is_set():
                 self.iteration()
         except _Stop:

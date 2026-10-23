@@ -1,0 +1,5 @@
+# GigaAM из git, закреплён полным хэшем коммита (тот же уровень гарантии, что и хэш файла). Ставится в образ
+# `pip install --no-deps` после requirements-gpu.txt: его зависимости перечислены в requirements-gpu.in и закреплены
+# с хэшами там. Хэш продублирован в transkrib/models_store.py (GIGAAM_COMMIT) — маркер готовности модели его проверяет.
+# Последний коммит main на 22.10.2026 (Merge PR #88, 17.08.2026).
+gigaam @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5

@@ -1,10 +1,63 @@
-# Заглушка: GPU, read_only, тома models (ro) и data, healthcheck, сервис загрузки моделей — наполнит T-7
-# (docs/tasks/T-7.md, docs/architecture.md «Развёртывание»). Портов наружу нет и не будет.
+# Сервер транскрибации (docs/architecture.md, «Развёртывание»). Портов наружу нет и не будет: демон сам ходит в
+# instudy (pull). Переменные — из .env рядом (compose подставляет их сам); env_file не используется, чтобы каждый
+# сервис видел только свои переменные: SERVICE_TOKEN — только transkrib, HF_TOKEN — только models.
+
+x-common: &common
+  build: .
+  image: instudy-transkrib:local
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
 services:
   transkrib:
-    build: .
-    image: instudy-transkrib:local
-    restart: "no"
+    <<: *common
+    gpus: all
+    restart: unless-stopped
+    stop_grace_period: 45s
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data
     environment:
       INSTUDY_API_URL: ${INSTUDY_API_URL:-}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-60}
+      HEARTBEAT_SEC: ${HEARTBEAT_SEC:-300}
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-314572800}
+      MAX_AUDIO_SEC: ${MAX_AUDIO_SEC:-21600}
+      MAX_SEGMENT_SEC: ${MAX_SEGMENT_SEC:-22}
+      KEEP_MODELS_LOADED: ${KEEP_MODELS_LOADED:-false}
+      RESULTS_KEEP_DAYS: ${RESULTS_KEEP_DAYS:-14}
+      MIN_FREE_GB: ${MIN_FREE_GB:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-m", "transkrib.cli", "health"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
+
+  # Разовая загрузка/перенос моделей: docker compose run --rm models models-download | models-import /import | models-check
+  # Только этот сервис пишет в models/ и видит HF_TOKEN; GPU и SERVICE_TOKEN ему не нужны.
+  models:
+    <<: *common
+    profiles: ["models"]
+    restart: "no"
+    entrypoint: ["/usr/bin/tini", "--", "python", "-m", "transkrib.cli"]
+    command: ["models-check"]
+    volumes:
+      - ./models:/models
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HUB_OFFLINE: "0"  # загрузка с Hugging Face — единственное место, где сеть к HF нужна
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
