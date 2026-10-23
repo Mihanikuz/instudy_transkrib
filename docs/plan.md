@@ -35,7 +35,7 @@ Oct 22, 2026 · @Mikhail
 | T-6a | 4 | Демон: защита попыток дней от неисправностей сервера (модели не грузятся, предохранитель) | слита | [#10](https://github.com/Mihanikuz/instudy_transkrib/pull/10) |
 | — | — | Рендер: удаление заполнителей (решение 22.10) | слита | [#6](https://github.com/Mihanikuz/instudy_transkrib/pull/6) |
 | — | — | Отчёт: сравнение моделей (`docs/experiments/2026-10-22-asr-models.md`) | слита | [#8](https://github.com/Mihanikuz/instudy_transkrib/pull/8) |
-| T-7 | 5 | Docker-образ, compose, README по установке и обновлению | слита (проверка на сервере — человек) | [#11](https://github.com/Mihanikuz/instudy_transkrib/pull/11) |
+| T-7 | 5 | Docker-образ, compose, README по установке и обновлению | слита; на сервере проверено 23.10 (образ 13,4 ГБ, cli check ok, run-file 3 ч за 6 мин 17 с, VRAM ≤ 1,6 ГБ) | [#11](https://github.com/Mihanikuz/instudy_transkrib/pull/11) |
 | T-8 | 5 | Замеры и качество на реальных записях (3 ч уже замерена — отчёт #8; остаются 1 ч и 5 ч в образе T-7) | не начата | — |
 | T-9 | 6 | Сверка контракта с instudy, боевой запуск | не начата | — |
 
