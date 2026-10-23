@@ -90,6 +90,7 @@ class StateStore:
             "status": STATUS_IDLE,
             "reason": None,
             "next_check_at": None,  # когда демон снова проверит модели (статус error: models_load / model_breaker)
+            "instudy_paused": None,  # health instudy: выдача выключена админом (autotx-pause); None — ещё не спрашивали
             "job": None,
             "counters": dict.fromkeys(COUNTERS, 0),
             "last_error": None,
@@ -124,6 +125,13 @@ class StateStore:
                 return
             self._state["status"], self._state["reason"] = status, reason
             self._state["next_check_at"] = next_check
+            self._write()
+
+    def set_instudy_paused(self, paused: bool) -> None:
+        with self._lock:
+            if self._state["instudy_paused"] is paused:
+                return
+            self._state["instudy_paused"] = bool(paused)
             self._write()
 
     def error(self, code: str) -> None:

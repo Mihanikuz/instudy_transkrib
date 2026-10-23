@@ -479,6 +479,7 @@ def test_state_store_atomic_and_fields(tmp_path: Path) -> None:
         "status",
         "reason",
         "next_check_at",
+        "instudy_paused",
         "job",
         "counters",
         "last_error",

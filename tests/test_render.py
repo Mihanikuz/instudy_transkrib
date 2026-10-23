@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -228,3 +229,59 @@ def test_build_meta() -> None:
 def test_date_as_iso_string() -> None:
     out = render_txt(SCENARIO, discipline="  Общая  психология ", date="2026-09-29", engine_line=ENGINE)
     assert out.startswith("Общая психология — 29.09.2026\nАвтотранскрипт: GigaAM")
+
+
+# ------------------------------------------------------------------ правила instudy для результата (T-9)
+
+
+def _many_speakers(n: int) -> list[Segment]:
+    return [Segment(i * 2.0, i * 2.0 + 1.5, i + 1, f"Реплика номер {i + 1}.") for i in range(n)]
+
+
+def test_more_than_99_speakers_merge_into_99() -> None:
+    from tests.instudy_reference import check_vtt
+
+    segments = _many_speakers(120)
+    vtt = render_vtt(segments)
+    voices = {int(v) for v in re.findall(r"<v Спикер (\d+)>", vtt)}
+    assert voices == set(range(1, 100))
+    assert vtt.count("<v Спикер 99>") == 22  # 99-й и все, кто после него
+    assert check_vtt(vtt) == 120  # instudy принимает
+    txt = render_txt(segments, discipline="Тест", date=date(2026, 9, 29), engine_line=ENGINE)
+    assert "Спикер 100" not in txt and "Спикер 99: Реплика номер 99. Реплика номер 100." in txt
+    assert (
+        build_meta(
+            server="s", asr="a", diarization="d", audio_duration_sec=1, processing_sec=1, speakers=120, segments=120
+        )["speakers"]
+        == 99
+    )
+
+
+def test_rendered_vtt_passes_instudy_result_check() -> None:
+    from tests.instudy_reference import check_vtt
+
+    segments = [*SCENARIO, Segment(310.0, 315.0, 1, "Формула: a < b && c > d.")]
+    vtt = render_vtt(segments)
+    assert check_vtt(vtt) == len(segments)
+    lines = vtt.split("\n")
+    assert lines[0] == "WEBVTT" and lines[1] == ""
+    timing = [ln for ln in lines if "-->" in ln]
+    assert all(
+        re.fullmatch(r"\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}", ln) for ln in timing
+    )  # без настроек
+    # между репликами ровно одна пустая строка: номер реплики всегда после пустой строки
+    for i, ln in enumerate(lines):
+        if "-->" in ln:
+            assert lines[i - 2] == "" and lines[i - 1].isdigit()
+    assert "a &lt; b &amp;&amp; c &gt; d." in vtt
+
+
+def test_timecode_over_12_hours_is_rejected() -> None:
+    from tests.instudy_reference import ResultError, check_vtt
+
+    ok = render_vtt([Segment(11 * 3600 + 3599.0, 12 * 3600.0, 1, "Последняя реплика.")])
+    assert "12:00:00.000" in ok and check_vtt(ok) == 1
+    with pytest.raises(ValueError, match="12 часов"):
+        render_vtt([Segment(12 * 3600.0, 12 * 3600 + 2.0, 1, "Слишком поздно.")])
+    with pytest.raises(ResultError):  # и сам instudy такое не принял бы
+        check_vtt("WEBVTT\n\n1\n12:00:00.000 --> 12:00:02.000\n<v Спикер 1>Слишком поздно.\n")

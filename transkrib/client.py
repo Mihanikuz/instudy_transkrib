@@ -1,4 +1,4 @@
-"""Клиент сервисного API instudy (docs/contract.md).
+"""Клиент сервисного API instudy (docs/contract.md → instudy/docs/transcription-api.md).
 
 Клиент только выполняет запросы и классифицирует исходы типизированными исключениями. Повторы, задержки и решение,
 слать ли fail, — у вызывающего кода (демон, T-6).
@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import email.utils
+import hashlib
 import json
 import logging
 import re
@@ -37,6 +38,12 @@ logger = logging.getLogger(__name__)
 API_PREFIX = "/api/service/v1"
 MESSAGE_MAX = 300
 DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+
+# Лимиты приёма результата в instudy (transcription-api.md, «Лимиты»): превышение — 413, поэтому не отправляем вовсе.
+MiB = 1024 * 1024
+RESULT_FILE_MAX = 10 * MiB
+RESULT_META_MAX = 4096
+RESULT_BODY_MAX = 50 * MiB
 
 
 # ------------------------------------------------------------------------------- исходы
@@ -116,10 +123,13 @@ class Cancelled(ClientError):
 
 
 class Rejected(ClientError):
-    """instudy не принял результат (413, 415, 422): повтор не поможет."""
+    """instudy не принял результат (413, 415, 422) или он больше лимитов: повтор не поможет.
 
-    def __init__(self, status: int, reason: FailReason) -> None:
-        super().__init__(f"instudy не принял результат: HTTP {status}")
+    status None — результат не отправлялся: превышение лимита найдено до запроса.
+    """
+
+    def __init__(self, status: int | None, reason: FailReason, message: str | None = None) -> None:
+        super().__init__(message or f"instudy не принял результат: HTTP {status}")
         self.status = status
         self.reason = reason
 
@@ -139,7 +149,13 @@ class Job(BaseModel):
     audio_url: str = Field(alias="audioUrl", repr=False, max_length=4096)
     audio_size_bytes: int = Field(alias="audioSizeBytes", gt=0, strict=True)
     audio_duration_sec: int | None = Field(default=None, alias="audioDurationSec", gt=0, strict=True)
+    audio_sha256: str = Field(alias="audioSha256", pattern=r"^[0-9a-fA-F]{64}$")
     lease_until: datetime = Field(alias="leaseUntil")
+
+    @field_validator("audio_sha256")
+    @classmethod
+    def _lower(cls, value: str) -> str:
+        return value.lower()
 
     @field_validator("lease_until")
     @classmethod
@@ -160,6 +176,29 @@ def sanitize_message(message: str) -> str:
     text = _PATH_RX.sub("<path>", text)
     text = " ".join(text.split())
     return text[:MESSAGE_MAX]
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def check_result_size(vtt: bytes, txt: bytes, meta_json: str) -> None:
+    """Лимиты instudy: каждый файл ≤ 10 МиБ, meta ≤ 4 КиБ, тело ≤ 50 МиБ. Превышение — Rejected без отправки."""
+    meta_bytes = len(meta_json.encode("utf-8"))
+    too_large = [
+        name
+        for name, size, limit in (("vtt", len(vtt), RESULT_FILE_MAX), ("txt", len(txt), RESULT_FILE_MAX))
+        if size > limit
+    ]
+    if meta_bytes > RESULT_META_MAX:
+        too_large.append("meta")
+    if too_large or len(vtt) + len(txt) + meta_bytes > RESULT_BODY_MAX:
+        sizes = f"vtt {len(vtt)} Б, txt {len(txt)} Б, meta {meta_bytes} Б"
+        raise Rejected(None, FailReason.RESULT_TOO_LARGE, f"Результат больше лимитов instudy ({sizes})")
 
 
 def _retry_after(response: httpx.Response) -> float:
@@ -264,6 +303,11 @@ class InstudyClient:
             raise Transient("instudy вернул неверный ответ на health")
         return data
 
+    @staticmethod
+    def health_paused(data: dict[str, Any]) -> bool:
+        """paused из ответа health: выдача выключена админом (autotx-pause) — не ошибка, jobs/next отвечает 204."""
+        return data.get("paused") is True
+
     def next_job(self) -> Job | None:
         response = self._request("GET", "/jobs/next")
         if response.status_code == 204:
@@ -346,6 +390,10 @@ class InstudyClient:
         size = dest.stat().st_size
         if size != expected:
             raise DownloadFailed(f"Размер аудио {size} не совпал с ожидаемым {expected}")
+        if file_sha256(dest) != job.audio_sha256:
+            # Файл мог смениться между выдачей и скачиванием (admin audio-reencode): повторная выдача даст новый хэш.
+            dest.unlink(missing_ok=True)
+            raise DownloadFailed("SHA-256 аудио не совпал с audioSha256 работы")
         return dest
 
     def _download_once(self, job: Job, dest: Path, have: int, expected: int, cancel: threading.Event | None) -> None:
@@ -383,11 +431,13 @@ class InstudyClient:
                     fh.write(chunk)
 
     def submit_result(self, job_id: int, vtt: bytes, txt: bytes, meta: dict[str, Any]) -> ResultOutcome:
+        meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+        check_result_size(vtt, txt, meta_json)
         files = {
             "vtt": ("transcript.vtt", vtt, "text/vtt; charset=utf-8"),
             "txt": ("transcript.txt", txt, "text/plain; charset=utf-8"),
         }
-        data = {"meta": json.dumps(meta, ensure_ascii=False, separators=(",", ":"))}
+        data = {"meta": meta_json}
         response = self._request("POST", f"/jobs/{int(job_id)}/result", files=files, data=data)
         status = response.status_code
         if status == 202:
@@ -400,6 +450,9 @@ class InstudyClient:
             raise Rejected(status, FailReason.RESULT_TOO_LARGE)
         if status in (415, 422):
             raise Rejected(status, FailReason.RESULT_REJECTED)
+        if status == 400:
+            # Форма оборвалась посреди отправки (обрыв связи): повторять, пока жива аренда, как 5xx.
+            raise Transient("instudy получил оборванную форму результата (400)")
         raise self._unexpected(response, "result")
 
     def fail(self, job_id: int, reason: FailReason, message: str, retryable: bool | None = None) -> bool:

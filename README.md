@@ -187,5 +187,9 @@ sudo systemctl restart ollama
 | `error (unauthorized …)`, в логах `401` | Токен отозван или вставлен с ошибкой. Получите новый («Получение токена»), исправьте `.env`, выполните `docker compose up -d` |
 | `paused (low_disk)` | Меньше `MIN_FREE_GB` свободного места на диске с `data/`. Освободите место (например, старые `data/results/`, `docker image prune`) |
 | `paused (pause)` | Включена пауза: `cli resume` |
+| `cli status`: «instudy: выдача работ на паузе (autotx-pause…)» | Выдачу выключил админ instudy. Это не ошибка: демон продолжает опрашивать очередь и возьмёт работу, как только пауза будет снята |
+| В логах `instudy ответил 503 на GET /jobs/next` | В instudy не настроен сервисный API (не задан `SERVICE_LINK_SECRET`). Это чинится на стороне instudy, демон повторяет сам |
+| Каждая работа уходит в `invalid_job` «Ссылка на аудио ведёт не на сервер instudy» | Хост `INSTUDY_API_URL` не совпадает с базовым адресом instudy (`API_BASE_URL` или `https://api.<DOMAIN>`). Исправьте `.env` или настройку instudy |
+| `fail download_failed` «SHA-256 аудио не совпал» | Аудио дня пережали (`audio-reencode`) во время скачивания. Работа вернётся в очередь с новым хэшем |
 | Контейнер `unhealthy` | Демон не обновлял `state.json` больше 3 минут, процесс завис или упал. Смотрите `docker compose logs --tail 200 transkrib`, перезапуск — `docker compose restart transkrib` |
 | В логах предупреждение torchcodec про `libnppicc.so.12` | Безвредно (аудио передаётся в pyannote массивом, декодер torchcodec не используется); в `diarize.load()` оно заглушено |

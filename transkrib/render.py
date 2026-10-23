@@ -17,6 +17,8 @@ from transkrib.types import Segment
 SPEAKER_LABEL = "Спикер {n}"
 ENGINE_LINE = "GigaAM v3 e2e RNNT, pyannote community-1"  # вторая строка шапки .txt
 
+MAX_SPEAKERS = 99  # instudy принимает голоса «Спикер 1»…«Спикер 99» и meta.speakers ≤ 99; остальные — в «Спикер 99»
+MAX_TIMECODE_MS = 12 * 3600 * 1000  # instudy не принимает таймкоды .vtt больше 12 часов
 PARAGRAPH_GAP_SEC = 60.0  # пауза больше — новый абзац того же спикера
 PARAGRAPH_MAX_SEC = 180.0  # абзац длиннее — новый абзац того же спикера
 
@@ -91,7 +93,10 @@ def _prepare(segments: Iterable[Segment]) -> list[_Cue]:
     numbers: dict[int, int] = {}
     for cue in cues:
         numbers.setdefault(cue.speaker, len(numbers) + 1)
-    cues = [_Cue(c.start_ms, c.end_ms, numbers[c.speaker], c.text) for c in cues]
+    # Спикеров сверх 99 instudy не принимает (422): все они сливаются в «Спикер 99».
+    cues = [_Cue(c.start_ms, c.end_ms, min(numbers[c.speaker], MAX_SPEAKERS), c.text) for c in cues]
+    if max(c.end_ms for c in cues) > MAX_TIMECODE_MS:
+        raise ValueError("Таймкод больше 12 часов — instudy такой .vtt не примет")
 
     # Пересечение: конец предыдущей реплики подрезается до начала следующей.
     out: list[_Cue] = []
@@ -182,7 +187,7 @@ def build_meta(
         "diarization": diarization,
         "audioDurationSec": round(audio_duration_sec),
         "processingSec": round(processing_sec),
-        "speakers": speakers,
+        "speakers": max(1, min(int(speakers), MAX_SPEAKERS)),
         "segments": segments,
     }
 

@@ -1,7 +1,9 @@
-"""Фейковый instudy для тестов: сервисный API по docs/contract.md поверх httpx.MockTransport.
+"""Фейковый instudy для тестов: сервисный API по instudy/docs/transcription-api.md поверх httpx.MockTransport.
 
-Моделирует очередь работ, аренды с подменяемыми часами, heartbeat, подписанные ссылки с exp, Range, ручную загрузку
-(409), исчезнувший день (410), неверный токен (401), лимит (429 + Retry-After), сбои по сценарию и обрывы скачивания.
+Моделирует очередь работ, аренды с подменяемыми часами, heartbeat, подписанные ссылки (job, exp, sig; гаснут вместе
+с арендой), audioSha256, Range, ручную загрузку (409 на result, 410 на heartbeat), исчезнувший день (410), неверный
+токен (401), лимит (429 + Retry-After), паузу выдачи (health paused, jobs/next 204), лимиты результата (413) и его
+проверку тем же валидатором, что в instudy (tests/instudy_reference.py, 422), сбои по сценарию и обрывы скачивания.
 Каждый запрос пишется в журнал — тесты проверяют заголовки и тела.
 """
 
@@ -18,10 +20,15 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+from tests.instudy_reference import ResultError, check_vtt, decode_strict, parse_meta, parse_multipart
+
 BASE_URL = "https://api.example.ru"
 TOKEN = "svc_tok_fake_1234567890abcdef"
 PREFIX = "/api/service/v1"
 LEASE = timedelta(minutes=30)
+LINK_TTL = timedelta(minutes=60)
+MiB = 1024 * 1024
+FILE_MAX, META_MAX, BODY_MAX = 10 * MiB, 4096, 50 * MiB
 SIGN_KEY = b"fake-sign-key"
 
 
@@ -41,6 +48,9 @@ class FakeJob:
     result: dict | None = None
     fails: list[dict] = field(default_factory=list)
     size_override: int | None = None  # прислать в работе неверный audioSizeBytes
+    sha_override: str | None = None  # прислать в работе неверный audioSha256
+    leased_at: datetime | None = None  # время выдачи аренды — входит в подпись ссылки
+    transcript_id: int | None = None
 
 
 @dataclass
@@ -72,6 +82,8 @@ class FakeInstudy:
         self.rate_limited: int = 0  # сколько следующих запросов получат 429
         self.break_download_at: list[int] = []  # обрывы скачивания: после скольких байт
         self.ignore_range = False
+        self.paused = False  # autotx-pause: health → paused, jobs/next → 204
+        self.next_transcript_id = 1534
         self.transport = httpx.MockTransport(self.handle)
 
     # ------------------------------------------------------------------ сценарии
@@ -103,7 +115,8 @@ class FakeInstudy:
         return [r for r in self.log if (method is None or r.method == method) and contains in r.path]
 
     def sign(self, job: FakeJob, exp: datetime) -> str:
-        msg = f"{job.day_id}:{int(exp.timestamp())}".encode()
+        issued = int(job.leased_at.timestamp()) if job.leased_at else 0
+        msg = f"audio\n{job.id}\n{job.day_id}\n{int(exp.timestamp())}\n{issued}".encode()
         return hmac.new(SIGN_KEY, msg, hashlib.sha256).hexdigest()
 
     # ------------------------------------------------------------------ обработчик
@@ -129,7 +142,10 @@ class FakeInstudy:
         if self.failures.get(key):
             return httpx.Response(self.failures[key].pop(0), json={"detail": "сбой по сценарию"})
         if rest == "/health" and request.method == "GET":
-            return httpx.Response(200, json={"ok": True, "serverTime": self.now.isoformat(), "client": "home-gpu"})
+            server_time = self.now.isoformat(timespec="seconds").replace("+00:00", "Z")
+            return httpx.Response(
+                200, json={"ok": True, "serverTime": server_time, "client": "home-gpu", "paused": self.paused}
+            )
         if rest == "/jobs/next" and request.method == "GET":
             return self._next()
         m = re.fullmatch(r"/jobs/(\d+)/(heartbeat|result|fail)", rest)
@@ -150,12 +166,15 @@ class FakeInstudy:
         return job.status == "leased" and job.leased_until is not None and job.leased_until > self.now
 
     def _next(self) -> httpx.Response:
+        if self.paused:
+            return httpx.Response(204)
         for job in sorted(self.jobs.values(), key=lambda j: (j.date, j.id)):
             expired = job.status == "leased" and not self._lease_alive(job)
             if (job.status == "queued" or expired) and not job.gone and not job.manual_transcript:
-                job.status, job.leased_until = "leased", self.now + LEASE
-                exp = job.leased_until
-                url = f"{BASE_URL}{PREFIX}/audio/{job.day_id}?exp={int(exp.timestamp())}&sig={self.sign(job, exp)}"
+                job.status, job.leased_until, job.leased_at = "leased", self.now + LEASE, self.now
+                exp = self.now + LINK_TTL
+                query = f"job={job.id}&exp={int(exp.timestamp())}&sig={self.sign(job, exp)}"
+                url = f"{BASE_URL}{PREFIX}/audio/{job.day_id}?{query}"
                 return httpx.Response(
                     200,
                     json={
@@ -167,6 +186,7 @@ class FakeInstudy:
                             "audioUrl": url,
                             "audioSizeBytes": job.size_override or len(job.audio),
                             "audioDurationSec": job.duration_sec,
+                            "audioSha256": job.sha_override or hashlib.sha256(job.audio).hexdigest(),
                             "leaseUntil": job.leased_until.isoformat().replace("+00:00", "Z"),
                         }
                     },
@@ -174,34 +194,66 @@ class FakeInstudy:
         return httpx.Response(204)
 
     def _heartbeat(self, job: FakeJob, request: httpx.Request, body: bytes) -> httpx.Response:
+        # Потеря работы — только 410, причина — в detail после двоеточия (409 instudy на heartbeat не отдаёт).
+        if not self._lease_alive(job):
+            return httpx.Response(410, json={"detail": "Работа больше не ваша"})
         if job.gone:
-            return httpx.Response(410, json={"detail": "День исчез"})
-        if not self._lease_alive(job) or job.manual_transcript:
-            return httpx.Response(409, json={"detail": "Работа не ваша"})
+            job.status = "skipped"
+            return httpx.Response(410, json={"detail": "Работа больше не ваша: день исчез из расписания или скрыт"})
+        if job.manual_transcript:
+            job.status = "skipped"
+            return httpx.Response(410, json={"detail": "Работа больше не ваша: у дня появился транскрипт"})
         job.leased_until = self.now + LEASE
         return httpx.Response(200, json={"leaseUntil": job.leased_until.isoformat().replace("+00:00", "Z")})
 
     def _result(self, job: FakeJob, request: httpx.Request, body: bytes) -> httpx.Response:
-        if job.gone or not self._lease_alive(job):
-            job.status = "skipped" if job.gone else job.status
-            return httpx.Response(410, json={"detail": "Работа не ваша"})
+        # Порядок проверок — как в instudy (transcription-api.md, «POST …/result»).
+        if not self._lease_alive(job):
+            return httpx.Response(410, json={"detail": "Работа больше не ваша"})
+        if job.gone:
+            job.status = "skipped"
+            return httpx.Response(410, json={"detail": "Работа больше не ваша: день исчез из расписания или скрыт"})
         if job.manual_transcript:
-            job.status = "done"
-            return httpx.Response(409, json={"detail": "Транскрипт уже загрузил(а) Анна К."})
+            job.status = "skipped"
+            return httpx.Response(409, json={"detail": "У дня уже есть транскрипт"})
         ctype = request.headers.get("Content-Type", "")
         if not ctype.startswith("multipart/form-data"):
-            return httpx.Response(415, json={"detail": "Нужен multipart"})
-        job.result = {"raw": body, "content_type": ctype}
+            return httpx.Response(415, json={"detail": "Нужен multipart/form-data"})
+        if len(body) > BODY_MAX:
+            return httpx.Response(413, json={"detail": "Тело больше 50 МБ"})
+        parts = parse_multipart(ctype, body)
+        if parts is None:
+            return httpx.Response(400, json={"detail": "Некорректные данные формы"})
+        if set(parts) != {"vtt", "txt", "meta"}:
+            return httpx.Response(422, json={"detail": "Нужны ровно поля vtt, txt и meta"})
+        if len(parts["vtt"][1]) > FILE_MAX or len(parts["txt"][1]) > FILE_MAX or len(parts["meta"][1]) > META_MAX:
+            return httpx.Response(413, json={"detail": "Файл больше 10 МБ или meta больше 4 КБ"})
+        try:
+            check_vtt(decode_strict(parts["vtt"][1], "vtt"))
+            if not decode_strict(parts["txt"][1], "txt").strip():
+                raise ResultError("txt: файл пустой")
+            parse_meta(parts["meta"][1].decode("utf-8"))
+        except (ResultError, UnicodeDecodeError) as exc:
+            return httpx.Response(422, json={"detail": str(exc)})
+        job.result = {"raw": body, "content_type": ctype, "parts": parts}
         job.status = "done"
-        return httpx.Response(202, json={"transcript": {"status": "processing"}})
+        job.transcript_id = self.next_transcript_id
+        self.next_transcript_id += 1
+        return httpx.Response(202, json={"transcriptId": job.transcript_id})
 
     def _fail(self, job: FakeJob, request: httpx.Request, body: bytes) -> httpx.Response:
         if not self._lease_alive(job):
-            return httpx.Response(409, json={"detail": "Работа не ваша"})
-        job.fails.append(json.loads(body))
-        job.attempts += 1
-        job.status = "failed" if job.attempts >= 3 else "queued"
+            return httpx.Response(410, json={"detail": "Работа больше не ваша"})
+        data = json.loads(body)
+        job.fails.append(data)
         job.leased_until = None
+        # shutdown попытку не засчитывает; retryable: false — сразу failed; третья засчитанная неудача — failed.
+        if data.get("reason") != "shutdown":
+            job.attempts += 1
+        if data.get("retryable") is False or job.attempts >= 3:
+            job.status = "failed"
+        else:
+            job.status = "queued"
         return httpx.Response(204)
 
     def _audio(self, request: httpx.Request, path: str, query: str) -> httpx.Response:
@@ -213,8 +265,18 @@ class FakeInstudy:
             sig = params["sig"][0]
         except (KeyError, ValueError):
             return httpx.Response(403, json={"detail": "Ссылка недействительна"})
-        if job is None or exp <= self.now or not hmac.compare_digest(sig, self.sign(job, exp)):
-            return httpx.Response(403, json={"detail": "Ссылка недействительна"})
+        try:
+            link_job = int(params["job"][0])
+        except (KeyError, ValueError):
+            return httpx.Response(403, json={"detail": "Ссылка недействительна или устарела"})
+        if (
+            job is None
+            or link_job != job.id
+            or exp <= self.now
+            or not self._lease_alive(job)
+            or not hmac.compare_digest(sig, self.sign(job, exp))
+        ):
+            return httpx.Response(403, json={"detail": "Ссылка недействительна или устарела"})
         if self.failures.get("GET audio"):
             return httpx.Response(self.failures["GET audio"].pop(0))
         data = job.audio
