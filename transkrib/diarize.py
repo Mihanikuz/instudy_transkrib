@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import warnings
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from transkrib import models_store
 from transkrib.asr import SAMPLE_RATE, ModelError
 
 logger = logging.getLogger(__name__)
+_NPP_WARNING = r"(?s).*libnpp"  # предупреждение torchcodec о CUDA NPP (libnppicc.so.12 и др.)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,12 @@ class PyannoteDiarizer:
         models_store.offline_env()
         try:
             import torch
-            from pyannote.audio import Pipeline
+
+            with warnings.catch_warnings():
+                # torchcodec при импорте ищет CUDA NPP (libnppicc.so.12) и предупреждает, если её нет. Безвредно:
+                # аудио идёт в pyannote массивом, декодер torchcodec не используется — NPP в образ не ставим.
+                warnings.filterwarnings("ignore", message=_NPP_WARNING)
+                from pyannote.audio import Pipeline
         except ImportError as exc:
             raise ModelError(f"Не установлен GPU-стек: {exc.name}") from None
         if not torch.cuda.is_available():
