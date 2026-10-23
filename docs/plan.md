@@ -6,6 +6,9 @@ Oct 22, 2026 · @Mikhail
 
 ## Зависимость от instudy
 
+Договор instudy готов: [`instudy/docs/transcription-api.md`](https://github.com/Mihanikuz/instudy/blob/main/docs/transcription-api.md) (ARCH-2, PR #37). Реализация — волны 8–11 instudy (BE-14, BE-15 → BE-17, FE-6 → BE-18 → BE-19).
+
+
 Сервисный API на стороне instudy проектирует архитектор (ARCH-2, [PR #35](https://github.com/Mihanikuz/instudy/pull/35)) и реализуют задачи BE-14 и следующие по его нарезке. До их слияния мы пишем клиента по черновику `docs/contract.md` и проверяем его на фейковом instudy (`tests/fake_instudy.py`). Боевой запуск (T-9) — только после выкладки сервисного API в instudy.
 
 ## Волны
@@ -16,7 +19,7 @@ Oct 22, 2026 · @Mikhail
 | 2 | T-2 · T-3 · T-4 | T-1 в `main` | Модели и GPU / рендер / клиент instudy — не пересекаются |
 | 3 | T-5 | T-2, T-3 в `main` | Конвейер одной записи |
 | 4 | T-6 | T-4, T-5 в `main` | Демон, CLI, состояние |
-| 5 | T-7 · T-8 | T-6 в `main` | Выкладка на сервер; замеры на реальных лекциях (человек + агент) |
+| 5 | T-6a → T-7 · T-8 | T-6 в `main`; T-7 после T-6a | Выкладка на сервер; замеры на реальных лекциях (человек + агент) |
 | 6 | T-9 | T-7 в `main` и сервисный API instudy выложен | Сверка контракта, боевой прогон, запуск архива |
 
 ## Статус
@@ -28,9 +31,12 @@ Oct 22, 2026 · @Mikhail
 | T-3 | 2 | Рендер `.vtt` и `.txt` | слита | [#2](https://github.com/Mihanikuz/instudy_transkrib/pull/2) |
 | T-4 | 2 | Клиент сервисного API instudy и фейковый instudy | слита | [#3](https://github.com/Mihanikuz/instudy_transkrib/pull/3) |
 | T-5 | 3 | Конвейер: аудио, нарезка, спикеры, ASR, отмена | слита | [#5](https://github.com/Mihanikuz/instudy_transkrib/pull/5) |
-| T-6 | 4 | Демон: аренда, heartbeat, результат, fail, сигналы, CLI | не начата | — |
+| T-6 | 4 | Демон: аренда, heartbeat, результат, fail, сигналы, CLI | слита | [#7](https://github.com/Mihanikuz/instudy_transkrib/pull/7) |
+| T-6a | 4 | Демон: защита попыток дней от неисправностей сервера (модели не грузятся, предохранитель) | не начата | — |
+| — | — | Рендер: удаление заполнителей (решение 22.10) | слита | [#6](https://github.com/Mihanikuz/instudy_transkrib/pull/6) |
+| — | — | Отчёт: сравнение моделей (`docs/experiments/2026-10-22-asr-models.md`) | слита | [#8](https://github.com/Mihanikuz/instudy_transkrib/pull/8) |
 | T-7 | 5 | Docker-образ, compose, README по установке и обновлению | не начата | — |
-| T-8 | 5 | Замеры и качество на реальных записях | не начата | — |
+| T-8 | 5 | Замеры и качество на реальных записях (3 ч уже замерена — отчёт #8; остаются 1 ч и 5 ч в образе T-7) | не начата | — |
 | T-9 | 6 | Сверка контракта с instudy, боевой запуск | не начата | — |
 
 Статусы: не начата → в работе → на ревью → слита.
