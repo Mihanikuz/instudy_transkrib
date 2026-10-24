@@ -1,6 +1,7 @@
 """Контракт с instudy, зафиксированный тестом: пути, поля, коды и лимиты из instudy/docs/transcription-api.md.
 
-Сверено с instudy main 4e55604 (23.10.2026). Если instudy поменяет договор, должен упасть этот тест, а не прод:
+Сверено с instudy main 4e55604 (23.10.2026), перепроверено на c5ad409 (24.10.2026) — без изменений.
+Если instudy поменяет договор, должен упасть этот тест, а не прод:
 тогда обновить договорные константы ниже вместе с клиентом, фейком (tests/fake_instudy.py), эталоном
 (tests/instudy_reference.py) и docs/contract.md.
 
@@ -261,6 +262,15 @@ def test_status_codes(name: str, status: int, expected) -> None:
         assert err.value.reason is expected and err.value.status == status
     else:
         assert call(c, name) == expected
+
+
+def test_caddy_413_without_body_is_result_too_large() -> None:
+    """Тело результата сверх лимита Caddy instudy (OPS-2: max_size 51MiB) режет ещё до API: 413 с пустым телом,
+    не JSON. Клиент смотрит только на код — тот же fail result_too_large, что и на 413 от API."""
+    c = make(413, headers={"Content-Type": "text/plain; charset=utf-8"})  # body=None — пустое тело, как у Caddy
+    with pytest.raises(Rejected) as err:
+        call(c, "result")
+    assert err.value.reason is FailReason.RESULT_TOO_LARGE and err.value.status == 413
 
 
 def test_retry_after_seconds() -> None:

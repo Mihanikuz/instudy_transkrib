@@ -1,8 +1,8 @@
 # Контракт с instudy
 
-Oct 23, 2026 · @Mikhail
+Oct 23, 2026 · @Mikhail · перепроверено Oct 24, 2026
 
-> **Источник истины — [`instudy/docs/transcription-api.md`](https://github.com/Mihanikuz/instudy/blob/main/docs/transcription-api.md)** (договор ARCH-2; реализован в instudy задачами BE-14, BE-17, BE-18, BE-19). Этот файл — краткая выжимка того, что использует наш клиент. Сверен построчно в T-9 с instudy `main` на коммите `4e55604` (23.10.2026). Если они расходятся, прав instudy. Совпадение кода с договором проверяют `tests/test_contract_instudy.py` (пути, поля, коды, лимиты) и `tests/instudy_reference.py`: это копия проверки результата из instudy, через неё фейковый instudy прогоняет каждый наш `result`.
+> **Источник истины — [`instudy/docs/transcription-api.md`](https://github.com/Mihanikuz/instudy/blob/main/docs/transcription-api.md)** (договор ARCH-2; реализован в instudy задачами BE-14, BE-17, BE-18, BE-19). Этот файл — краткая выжимка того, что использует наш клиент. Сверен построчно в T-9 с instudy `main` на коммите `4e55604` (23.10.2026) и перепроверен на `c5ad409` (24.10.2026): договор, код сервисного API (`app/api/routes/service*.py`, `app/autotx.py`, `app/autotx_result.py`) и раздел «Сервисный API» в `docs/api.md` с тех пор не менялись. Если они расходятся, прав instudy. Совпадение кода с договором проверяют `tests/test_contract_instudy.py` (пути, поля, коды, лимиты) и `tests/instudy_reference.py`: это копия проверки результата из instudy, через неё фейковый instudy прогоняет каждый наш `result`.
 
 ## Что мы используем
 
@@ -64,6 +64,8 @@ instudy при `retryable: true` возвращает работу в очере
 
 Каждый файл ≤ 10 МиБ, `meta` ≤ 4096 байт, всё тело ≤ 50 МиБ. Превышение клиент находит до отправки и сразу шлёт `fail result_too_large` (`client.check_result_size`). Для ориентира: 5 часов речи — около 0,4 МБ `.txt` и 1 МБ `.vtt`.
 
+Перед API тело ограничивает Caddy instudy: с OPS-2 (instudy#49) — `max_size 51MiB`, больше лимита API. До OPS-2 там было `51MB` = 51 000 000 байт, меньше 50 МиБ, и тело от ≈ 48,6 до 50 МиБ резал бы Caddy. Его `413` приходит с пустым телом, клиент смотрит только на код и отвечает тем же `fail result_too_large` (тест `test_caddy_413_without_body_is_result_too_large`). В договоре instudy пока написано `51MB`: правка текста — задача instudy DOC-1.
+
 ## Формат результата
 
 Оба файла — UTF-8 без BOM, переводы строк `\n`. Полные правила и примеры — в договоре, раздел «Формат результата».
@@ -88,6 +90,10 @@ instudy при `retryable: true` возвращает работу в очере
 - В instudy задан `SERVICE_LINK_SECRET` (≥ 32 байт), иначе `jobs/next` отвечает `503`, а любая ссылка на аудио — `403`.
 - Хост базового адреса instudy (`API_BASE_URL` или `https://api.<DOMAIN>`) совпадает с хостом `INSTUDY_API_URL`. Иначе каждая работа приходит с «чужой» ссылкой и получает `invalid_job`.
 - Сервисный токен выдаётся командой `python -m app.cli service-add home-gpu`, отзывается — `service-revoke`. Выдачу ставит на паузу и снимает с неё админ (`autotx-pause`): для демона это `paused` в health и `204` на `jobs/next`, не ошибка.
+
+## Боевой запуск
+
+23.10.2026 (T-9, пункт 4, проводил человек): токен `home-gpu` выдан, `cli check` — `instudy: ok`, модели на месте, GPU виден. После `cli resume` первая работа (день 15) и вторая (день 16) прошли до `done`. Чек-лист — в PR T-9.
 
 ## Решения клиента, которые договор подтвердил (бывшие пометки T-4)
 
