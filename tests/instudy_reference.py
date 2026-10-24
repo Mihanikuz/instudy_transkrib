@@ -5,8 +5,8 @@
 - decode_strict, check_vtt, parse_meta — проверка результата автотранскрибации перед приёмом (app/autotx_result.py,
   BE-18): нарушение — 422 в instudy. Фейковый instudy (tests/fake_instudy.py) прогоняет через них каждый result.
 
-Сверено с instudy main 4e55604 (23.10.2026, T-9). Если instudy поменяет эти функции — обновить копию и
-tests/test_contract_instudy.py.
+Сверено с instudy main 4e55604 (23.10.2026, T-9), перепроверено на c5ad409 (24.10.2026): extract_subtitles и
+app/autotx_result.py не менялись. Если instudy поменяет эти функции — обновить копию и tests/test_contract_instudy.py.
 """
 
 from __future__ import annotations
